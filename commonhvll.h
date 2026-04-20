@@ -1,5 +1,4 @@
 #pragma once
-
 #include "assert.h"
 #include "fcntl.h"
 #include "stdint.h"
@@ -72,15 +71,15 @@ uint64_t fnv_1a(const uint8_t *v, size_t len) {
 
 #define HASHMAP_DEFAULT_CAPACITY (size_t)2048 // must be multiple of 2
 
-struct hashMapEntry {
+struct hashMapKeyEntry {
   const uint8_t *k;
   size_t k_length;
 };
 
-typedef struct hashMapEntry hashMapEntry;
+typedef struct hashMapKeyEntry hashMapKeyEntry;
 
 struct hashMap {
-  hashMapEntry *ks;
+  hashMapKeyEntry *ks;
   void **v;
   size_t len;
   size_t cap;
@@ -100,7 +99,41 @@ void *hashMapRetr(const hashMap *m, const uint8_t *k, size_t k_length) {
   return 0;
 }
 
+// dest hashmap must be eq or larger than src
+void hashMapCopyInternal(hashMapKeyEntry *sks, void **sv, size_t scap,
+                         hashMapKeyEntry *dks, void **dv, size_t dcap) {
+  size_t i = 0;
+  while (i < scap) {
+    if ((sks + i)->k) {
+      uint64_t di = fnv_1a((sks + i)->k, (sks + i)->k_length) & (dcap - 1);
+      while ((dks + di)->k != 0) {
+        di = (di + 1) & (dcap - 1);
+      };
+      *(dks + di) = *(sks + i);
+      *(dv + di) = *(sv + i);
+    }
+    i++;
+  }
+}
+
+void hashMapResizeRelocate(hashMap *s, size_t newcap) {
+  void **nv = (void **)calloc(newcap, sizeof(void *));
+  hashMapKeyEntry *nks =
+      (hashMapKeyEntry *)calloc(newcap, sizeof(hashMapKeyEntry));
+  hashMapCopyInternal(s->ks, s->v, s->cap, nks, nv, newcap);
+  s->v = nv;
+  s->ks = nks;
+  s->cap = newcap;
+}
+
 void hashMapInsert(hashMap *m, const uint8_t *k, size_t k_length, void *v) {
+  if (m->len == m->cap) {
+    void *oks = m->ks;
+    void *ov = m->v;
+    hashMapResizeRelocate(m, m->cap << 1);
+    free(oks);
+    free(ov);
+  }
   uint64_t i = fnv_1a(k, k_length) & (m->cap - 1);
   while ((m->ks + i)->k != 0) {
     i = (i + 1) & (m->cap - 1);
@@ -136,17 +169,6 @@ int hashMapContains(hashMap *m, const uint8_t *k, size_t k_length) {
   }
   return 0;
 }
-
-size_t hashMapIterNextIdx(hashMap *m, size_t i) {
-  while (i < m->cap) {
-    if ((m->ks + i)->k) {
-      return i;
-    }
-    i++;
-  }
-  return m->cap;
-}
-
 // do linear search for now. too lazy to sort
 
 #define DEFTOKENS                                                              \
@@ -279,5 +301,6 @@ typedef struct Symbol {
    .depth = 0,                                                                 \
    .env_id = 0}
 
-const Symbol builtin_symbols[] = {DEFTYPESYMBOL("usize", &usize),
-                                  DEFTYPESYMBOL("isize", &isize)};
+const Symbol builtin_symbols[] =
+    /* !!DO NOT CHANGE THIS COMMENT!! ~!*/ {DEFTYPESYMBOL("usize", &usize),
+                                            DEFTYPESYMBOL("isize", &isize)};

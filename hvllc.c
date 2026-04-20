@@ -8,8 +8,6 @@
 #include "string.h"
 #include "sys/mman.h"
 #include "sys/stat.h"
-#include <stddef.h>
-#include <stdint.h>
 
 struct token_t {
   size_t s;
@@ -333,24 +331,32 @@ size_t Parser(const token_t *ts, size_t ts_length, struct parserEnv *env,
 typedef struct parserEnv parserEnv;
 
 void hashmap_test() {
-  hashMap m = {.ks = calloc(HASHMAP_DEFAULT_CAPACITY, sizeof(hashMapEntry)),
-               .v = calloc(HASHMAP_DEFAULT_CAPACITY, sizeof(void *)),
-               .cap = HASHMAP_DEFAULT_CAPACITY};
-  uint8_t k0[] = {'x'};
+  hashMap m = {.ks = calloc(2, sizeof(hashMapKeyEntry)),
+               .v = calloc(2, sizeof(void *)),
+               .cap = 2};
+
+  uint8_t k0[] = "dsgssdf";
   uint8_t v0[] = "hello!";
-  uint8_t k1[] =
+  uint8_t k1[] = {'x'};
+  uint8_t v1[] = "hello!";
+  uint8_t k2[] =
       "The desire of the sluggard kills him, for his hands refuse to labor.";
-  uint8_t v1[] = "birb";
+  uint8_t v2[] = "birb";
   hashMapInsert(&m, k0, sizeof(k0), v0);
   hashMapInsert(&m, k1, sizeof(k1), v1);
+  hashMapInsert(&m, k2, sizeof(k2), v2);
   assert(hashMapRetr(&m, k0, sizeof(k0)) == v0);
   assert(hashMapRetr(&m, k1, sizeof(k1)) == v1);
+  assert(hashMapRetr(&m, k2, sizeof(k2)) == v2);
   assert(hashMapContains(&m, k0, sizeof(k0)));
   assert(hashMapContains(&m, k1, sizeof(k1)));
+  assert(hashMapContains(&m, k2, sizeof(k2)));
   hashMapPullOut(&m, k0, sizeof(k0));
   hashMapPullOut(&m, k1, sizeof(k1));
+  hashMapPullOut(&m, k2, sizeof(k2));
   assert(!hashMapContains(&m, k0, sizeof(k0)));
   assert(!hashMapContains(&m, k1, sizeof(k1)));
+  assert(!hashMapContains(&m, k2, sizeof(k2)));
   free(m.ks);
   free(m.v);
 }
@@ -393,7 +399,7 @@ int main(int argc, char **argv) {
   }
   arena parser_arena = {.v = calloc(0xFFFF, 1), .cap = 0xFFFF, .len = 0};
   hashMap symbols = {.ks =
-                         calloc(HASHMAP_DEFAULT_CAPACITY, sizeof(hashMapEntry)),
+                         calloc(HASHMAP_DEFAULT_CAPACITY, sizeof(hashMapKeyEntry)),
                      .v = calloc(HASHMAP_DEFAULT_CAPACITY, sizeof(envSymbol *)),
                      .cap = HASHMAP_DEFAULT_CAPACITY};
   struct parserEnv env = {
