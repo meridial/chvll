@@ -193,17 +193,16 @@ size_t StringEscape(uint8_t *d, const uint8_t *s, size_t len) {
 
 #define token_backwards_check()                                                \
   if (ci != current_token_start) {                                             \
-    token_t *t = arenaAlloc(ta, sizeof(token_t));                              \
-    t->token_type = (size_t)hashMapRetr(                               \
-        &tkhm, srcmap + current_token_start, ci - current_token_start);        \
+    token_t *t = vectorAlloc(tv, sizeof(token_t));                             \
+    t->token_type = (size_t)hashMapRetr(&tkhm, srcmap + current_token_start,   \
+                                        ci - current_token_start);             \
     t->len = ci - current_token_start;                                         \
     t->character_offset = current_token_start;                                 \
     t->s = (size_t)srcmap + current_token_start;                               \
     current_token_start = ci;                                                  \
   }
 
-void tokenize_normal(const uint8_t *srcmap, size_t len, arena *ta,
-                     arena *stra) {
+void tokenize_normal(const uint8_t *srcmap, size_t len, arena *a, vector *tv) {
   size_t current_token_start = 0;
   size_t ci = 0;
   while (ci < len) {
@@ -218,7 +217,7 @@ void tokenize_normal(const uint8_t *srcmap, size_t len, arena *ta,
         ci++;
       }
       if (contains_newline_layout) {
-        token_t *t = arenaAlloc(ta, sizeof(token_t));
+        token_t *t = vectorAlloc(tv, sizeof(token_t));
         t->token_type = TokenLayout;
         t->character_offset = current_token_start;
       }
@@ -241,12 +240,12 @@ void tokenize_normal(const uint8_t *srcmap, size_t len, arena *ta,
           break;
         }
       }
-      uint8_t *sb = arenaAlloc(stra, cci - ci);
+      uint8_t *sb = arenaAlloc(a, cci - ci);
       size_t nsl = StringEscape(sb, srcmap + ci, cci - ci);
       if (!nsl) {
         MALFORMSTRING_EXIT(srcmap, ci, cci - ci)
       }
-      token_t *t = arenaAlloc(ta, sizeof(token_t));
+      token_t *t = vectorAlloc(tv, sizeof(token_t));
       t->token_type = TokenString;
       t->s = (size_t)sb;
       t->len = nsl;
@@ -270,7 +269,7 @@ void tokenize_normal(const uint8_t *srcmap, size_t len, arena *ta,
       if (!tt) {
         INVALIDNUMBER_EXIT(srcmap, ci, cci - ci)
       }
-      token_t *t = arenaAlloc(ta, sizeof(token_t));
+      token_t *t = vectorAlloc(tv, sizeof(token_t));
       t->token_type = tt;
       t->s = is_negative ? -IntegerParse(srcmap + ci + 1, cci - ci - 1)
                          : IntegerParse(srcmap + ci, cci - ci);
@@ -285,15 +284,6 @@ void tokenize_normal(const uint8_t *srcmap, size_t len, arena *ta,
   token_backwards_check();
   return;
 }
-struct envSymbol {
-  size_t depth;
-  // used when the depth is the same. index of environment (unique in whole src)
-  uint64_t env_idx;
-  hvllClass *type;
-  abstractSyntaxTree *symbol_src_ast;
-};
-
-typedef struct envSymbol envSymbol;
 
 struct parserEnv {
   const uint8_t *srcmap;
@@ -320,13 +310,36 @@ struct parserEnv {
 enum parseContextType { contextExpr, contextType };
 
 struct parseContext {
-  enum parseContextType pctt;
+  uint8_t pctt;
 };
 
 // single expr step parser
 size_t Parser(const token_t *ts, size_t ts_length, struct parserEnv *env,
               struct parseContext pctx, size_t depth, size_t env_idx,
               abstractSyntaxTree *ast) {
+  switch (ts->token_type) {
+  case TokenParenClose:
+    UNMATCHEDPAREN_EXIT(env->srcmap, ts->character_offset) break;
+  case TokenParenOpen:
+    if (ts_length < 2) {
+      UNMATCHEDPAREN_EXIT(env->srcmap, ts->character_offset);
+    }
+    if (ts[1].token_type == TokenParenClose) {
+      switch (pctx.pctt) {
+      contextType:
+        *ast = UnitTypeDef;
+        return 2;
+        break;
+      contextExpr:
+        *ast = UnitAst;
+        return 2;
+        break;
+      }
+      size_t d = 1;
+    }
+
+    break;
+  }
 }
 typedef struct parserEnv parserEnv;
 
@@ -361,15 +374,6 @@ void hashmap_test() {
   free(m.v);
 }
 
-// meh realloc should work
-void arena_test() {
-  arena a = {.v = malloc(314), .len = 0, .cap = 314};
-  uint64_t v0 = 3958395;
-  *(uint64_t *)arenaAlloc(&a, 8) = v0;
-  assert(*(uint64_t *)(a.v) == v0);
-  free(a.v);
-}
-
 int main(int argc, char **argv) {
   if (argc <= 1) {
     printf("please pass filename\n");
@@ -381,32 +385,27 @@ int main(int argc, char **argv) {
         "cant open file. please check if it is readable and actually exists\n");
     return 1;
   }
-  struct stat file_stat;
-  fstat(fd, &file_stat);
-  uint8_t *map = mmap(0, file_stat.st_size, PROT_READ, MAP_SHARED, fd, 0);
+  struct stat fst;
+  fstat(fd, &fst);
+  uint8_t *map = mmap(0, fst.st_size, PROT_READ, MAP_SHARED, fd, 0);
   if (map == 0) {
     printf("map failed\n");
     return 1;
   }
-  // default token array size
-  size_t ts_size = file_stat.st_size / 2 * sizeof(token_t);
-  size_t misc = 0;
-  arena ts = {.v = calloc(ts_size, 1), .cap = ts_size, .len = 0, .count = 0};
-  arena stra = {.v = calloc(1024, 1), .cap = 1024, .len = 0, .count = 0};
-  tokenize_normal(map, file_stat.st_size, &ts, &stra);
-  for (size_t i = 0; i < ts.count; i++) {
-    printf("%s\n", TokenTypeString[((token_t *)ts.v)[i].token_type]);
+  size_t tokens_vector_size = (fst.st_size << 2) * sizeof(token_t);
+  arena a = {.head = makeRegion(ARENA_REGION_DEFAULT_CAPACITY << 3),
+             .tail = a.head};
+  allocator_t allocator_interface = {.alloc = arenaAlloc_AllocatorInterface,
+                                     .realloc = arenaReAlloc_AllocatorInterface,
+                                     .free = arenaFree_AllocatorInterface};
+  vector tv = {.allocator = allocator_interface,
+               .cap = tokens_vector_size,
+               .len = 0,
+               .v = arenaAlloc(&a, tokens_vector_size)};
+  tokenize_normal(map, fst.st_size, &a, &tv);
+  for (size_t i = 0; i < tv.len / sizeof(token_t); i++) {
+    printf("%s\n", TokenTypeString[((token_t *)tv.v)[i].token_type]);
   }
-  arena parser_arena = {.v = calloc(0xFFFF, 1), .cap = 0xFFFF, .len = 0};
-  hashMap symbols = {.ks =
-                         calloc(HASHMAP_DEFAULT_CAPACITY, sizeof(hashMapKeyEntry)),
-                     .v = calloc(HASHMAP_DEFAULT_CAPACITY, sizeof(envSymbol *)),
-                     .cap = HASHMAP_DEFAULT_CAPACITY};
-  struct parserEnv env = {
-      .srcmap = map, .arena = &parser_arena, .symbols = &symbols};
-  free(ts.v);
-  free(stra.v);
   hashmap_test();
-  arena_test();
   return 0;
 }

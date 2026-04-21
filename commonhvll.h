@@ -7,7 +7,9 @@
 #include "string.h"
 #include "sys/mman.h"
 #include "sys/stat.h"
+#include <sys/mman.h>
 
+// non-null terminated string
 typedef struct str {
   uint8_t *s;
   size_t l;
@@ -19,43 +21,104 @@ typedef struct str {
 #define xstr(x) mstr(x)
 #define xenumstr(x) xstr(x),
 
-// dumb flat arena
+// allocator interface
+typedef struct allocator_t {
+  void *(*alloc)(void *allocator, size_t);
+  void *(*realloc)(void *allocator, void *, size_t);
+  void (*free)(void *allocator, void *);
+  void *allocator;
+} allocator_t;
 
-typedef struct arena arena;
+#define ARENA_REGION_DEFAULT_CAPACITY 1 << 13
 
-struct arena {
-  void *v;
-  size_t len;   // total bytes used
-  size_t count; // number of allocations
+typedef struct arenaRegion {
+  size_t inuse;
+  size_t len;
   size_t cap;
-};
+  struct arenaRegion *next;
+} arenaRegion;
 
-void *arenaAlloc(arena *a, size_t size) {
-  if (a->len + size >= a->cap) {
-    size_t newcap =
-        (a->cap << 1) + (size + sizeof(size_t) - 1) & ~(sizeof(size_t) - 1);
-    a->v = realloc(a->v, newcap); // null? scape
-    a->cap = newcap;
-  }
-  void *r = ((uint8_t *)a->v + a->len);
-  a->count++;
-  a->len = (a->len + size);
+// dumb arena
+typedef struct arena {
+  arenaRegion *head;
+  arenaRegion *tail;
+} arena;
+
+arenaRegion *makeRegion(size_t size) {
+  arenaRegion *r =
+      (arenaRegion *)mmap(0, size + sizeof(arenaRegion), PROT_READ | PROT_WRITE,
+                          MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
+  r->inuse = 0;
+  r->len = 0;
+  r->cap = size;
+  r->next = 0;
   return r;
 }
 
-void *arenaRealloc(arena *a, void *src, size_t src_size, size_t new_size) {
-  if (a->len + new_size >= a->cap) {
-    size_t newcap = (a->cap << 1) + new_size;
-    a->v = realloc(a->v, newcap); // null? let it happen
-    a->cap = newcap;
-  }
-  void *dest = ((uint8_t *)a->v + a->len);
-  memcpy(dest, src, src_size);
-  a->len = (a->len + new_size + sizeof(size_t) - 1) & ~(sizeof(size_t) - 1);
-  return dest;
+int freeRegion(arenaRegion *r) {
+  return munmap(r, r->cap + sizeof(arenaRegion));
 }
 
-void arenaDeallocLast(arena *a, size_t size) { a->len = a->len - size; }
+void arenaMarkNotInUse(void *v) { ((arenaRegion *)v - 1)->inuse = 0; }
+
+arenaRegion *_arenaAlloc(arena *a, size_t nbytes) {
+  arenaRegion *r = a->tail;
+  while (r->inuse && r->cap >= nbytes + sizeof(arenaRegion)) {
+    if (!r->next) {
+      r->next = makeRegion(nbytes < ARENA_REGION_DEFAULT_CAPACITY
+                               ? ARENA_REGION_DEFAULT_CAPACITY
+                               : nbytes);
+    }
+    r = r->next;
+  }
+  r->inuse = 1;
+  r->len = nbytes;
+  return r;
+}
+
+void *arenaAlloc(arena *a, size_t nbytes) { return _arenaAlloc(a, nbytes) + 1; }
+
+void arenaFree(arena *a) {
+  arenaRegion *r = a->head;
+  while (r) {
+    munmap(r, r->cap + sizeof(arenaRegion));
+    r = r->next;
+  }
+}
+
+void *arenaReAlloc(arena *a, void *v, size_t newsize) {
+  arenaRegion *r = (arenaRegion *)v - 1;
+  if (r->cap >= newsize) {
+    r->len = newsize;
+    return r + 1;
+  }
+  arenaRegion *nr = _arenaAlloc(a, newsize);
+  memcpy(nr + 1, r + 1, r->len);
+  return nr + 1;
+}
+void *arenaAlloc_AllocatorInterface(void *a, size_t size) {
+  return arenaAlloc((arena *)a, size);
+}
+void *arenaReAlloc_AllocatorInterface(void *a, void *v, size_t newsize) {
+  return arenaReAlloc((arena *)a, v, newsize);
+}
+void arenaFree_AllocatorInterface(void *_, void *v) { arenaMarkNotInUse(v); }
+
+typedef struct vector {
+  void *v;
+  size_t len;
+  size_t cap;
+  allocator_t allocator;
+} vector;
+
+void *vectorAlloc(vector *v, size_t size) {
+  if (v->len + size > v->cap) {
+    v->v = v->allocator.realloc(v->allocator.allocator, v->v,
+                                (v->cap << 2) + size);
+  }
+  v->len += size;
+  return (uint8_t *)v->v + v->len;
+}
 
 #define FNV_OFFSET 0xcbf29ce484222325
 #define FNV_PRIME 0x100000001b3
@@ -99,7 +162,6 @@ void *hashMapRetr(const hashMap *m, const uint8_t *k, size_t k_length) {
   return 0;
 }
 
-// dest hashmap must be eq or larger than src
 void hashMapCopyInternal(hashMapKeyEntry *sks, void **sv, size_t scap,
                          hashMapKeyEntry *dks, void **dv, size_t dcap) {
   size_t i = 0;
@@ -220,7 +282,7 @@ typedef struct hvllClass hvllClass;
 #define TYPEMODIFIER_MUTABLE 1 << 2
 #define TYPEMODIFIER_BORROW 1 << 3
 
-#define TYPECLASS_SENTINEL 1
+#define TYPECLASS_UNIT 1
 #define TYPECLASS_INTEGER 2
 #define TYPECLASS_BOOLEAN 3
 #define TYPECLASS_FUNCTION 4
@@ -254,15 +316,20 @@ const hvllClass isize = {.type_mod = 0,
                          .size = sizeof(size_t),
                          .name = LSTR("isize"),
                          .is_integer_signed = 1};
+const hvllClass UnitType = {.type_mod = 0,
+                            .type_class = TYPECLASS_UNIT,
+                            .size = 0,
+                            .name = LSTR("UNIT")};
 
-#define LEAF_EXPR 1 << ((sizeof(size_t) * 8) - 1)
+#define LEAF_EXPR (size_t)1 << ((sizeof(size_t) * 8) - 1)
 
 enum LeafType {
   LeafNull,
   LeafDecl,
   LeafAssign,
   LeafFnCall,
-  LeafTypeDef,
+  LeafType,
+  LeafScalar,
 };
 
 typedef struct abstractSyntaxTree abstractSyntaxTree;
@@ -288,6 +355,12 @@ struct abstractSyntaxTree {
   };
 };
 
+const abstractSyntaxTree UnitTypeDef = {.leaf_type = LeafType,
+                                        .type_class = &UnitType};
+
+const abstractSyntaxTree UnitAst = {.leaf_type = LEAF_EXPR,
+                                    .expr_class = &UnitType};
+
 typedef struct Symbol {
   str sym_name;
   const abstractSyntaxTree ast;
@@ -297,7 +370,7 @@ typedef struct Symbol {
 
 #define DEFTYPESYMBOL(nm, t)                                                   \
   {.sym_name = LSTR(nm),                                                       \
-   .ast = {.leaf_type = LeafTypeDef, .type_class = t},                         \
+   .ast = {.leaf_type = LeafType, .type_class = t},                            \
    .depth = 0,                                                                 \
    .env_id = 0}
 
