@@ -348,11 +348,12 @@ void print_ast(abstractSyntaxTree *a) {
   }
 }
 
-void hashmap_test(allocator_t * al) {
+void hashmap_test(allocator_t *al) {
 
   hashMap m = {.ks = al->alloc(al->allocator, sizeof(hashMapKeyEntry)),
-               .v = al->alloc(al->allocator, sizeof(void*)),
-               .cap = 1, .allocator = al};
+               .v = al->alloc(al->allocator, sizeof(void *)),
+               .cap = 1,
+               .allocator = al};
   uint8_t k0[] = "dsgssdf";
   uint8_t v0[] = "hello!";
   uint8_t k1[] = {'x'};
@@ -400,8 +401,7 @@ int main(int argc, char **argv) {
     return 1;
   }
   size_t tokens_vector_size = (fst.st_size << 2) * sizeof(token_t);
-  arena a = {.head = makeRegion(ARENA_REGION_DEFAULT_CAPACITY << 3),
-             .tail = a.head};
+  arena a = {.head = makeRegion(ARENA_REGION_DEFAULT_CAPACITY << 3)};
   allocator_t allocator_interface = {.alloc = arenaAlloc_AllocatorInterface,
                                      .realloc = arenaReAlloc_AllocatorInterface,
                                      .free = arenaFree_AllocatorInterface,

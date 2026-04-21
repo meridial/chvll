@@ -41,7 +41,6 @@ typedef struct arenaRegion {
 // dumb arena
 typedef struct arena {
   arenaRegion *head;
-  arenaRegion *tail;
 } arena;
 
 arenaRegion *makeRegion(size_t size) {
@@ -62,7 +61,7 @@ int freeRegion(arenaRegion *r) {
 void arenaMarkNotInUse(void *v) { ((arenaRegion *)v - 1)->inuse = 0; }
 
 arenaRegion *_arenaAlloc(arena *a, size_t nbytes) {
-  arenaRegion *r = a->tail;
+  arenaRegion *r = a->head;
   while (r->inuse && r->cap >= nbytes + sizeof(arenaRegion)) {
     if (!r->next) {
       r->next = makeRegion(nbytes < ARENA_REGION_DEFAULT_CAPACITY
