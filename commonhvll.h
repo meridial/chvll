@@ -97,6 +97,7 @@ void *arenaReAlloc(arena *a, void *v, size_t newsize) {
   memcpy(nr + 1, r + 1, r->len);
   return nr + 1;
 }
+
 void *arenaAlloc_AllocatorInterface(void *a, size_t size) {
   return arenaAlloc((arena *)a, size);
 }
@@ -109,12 +110,12 @@ typedef struct vector {
   void *v;
   size_t len;
   size_t cap;
-  allocator_t allocator;
+  allocator_t *allocator;
 } vector;
 
 void *vectorAlloc(vector *v, size_t size) {
   if (v->len + size > v->cap) {
-    v->v = v->allocator.realloc(v->allocator.allocator, v->v,
+    v->v = v->allocator->realloc(v->allocator->allocator, v->v,
                                 (v->cap << 2) + size);
   }
   uint8_t* va = (uint8_t *)v->v + v->len;

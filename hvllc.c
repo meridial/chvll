@@ -406,8 +406,9 @@ int main(int argc, char **argv) {
              .tail = a.head};
   allocator_t allocator_interface = {.alloc = arenaAlloc_AllocatorInterface,
                                      .realloc = arenaReAlloc_AllocatorInterface,
-                                     .free = arenaFree_AllocatorInterface};
-  vector tv = {.allocator = allocator_interface,
+                                     .free = arenaFree_AllocatorInterface,
+                                     .allocator = &a};
+  vector tv = {.allocator = &allocator_interface,
                .cap = tokens_vector_size,
                .len = 0,
                .v = arenaAlloc(&a, tokens_vector_size)};
