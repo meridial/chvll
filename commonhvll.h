@@ -81,8 +81,9 @@ void *arenaAlloc(arena *a, size_t nbytes) { return _arenaAlloc(a, nbytes) + 1; }
 void arenaFree(arena *a) {
   arenaRegion *r = a->head;
   while (r) {
+    arenaRegion *nr = r->next;
     munmap(r, r->cap + sizeof(arenaRegion));
-    r = r->next;
+    r = nr;
   }
 }
 
@@ -116,8 +117,9 @@ void *vectorAlloc(vector *v, size_t size) {
     v->v = v->allocator.realloc(v->allocator.allocator, v->v,
                                 (v->cap << 2) + size);
   }
+  uint8_t* va = (uint8_t *)v->v + v->len;
   v->len += size;
-  return (uint8_t *)v->v + v->len;
+  return va;
 }
 
 #define FNV_OFFSET 0xcbf29ce484222325
@@ -358,8 +360,9 @@ struct abstractSyntaxTree {
 const abstractSyntaxTree UnitTypeDef = {.leaf_type = LeafType,
                                         .type_class = &UnitType};
 
-const abstractSyntaxTree UnitAst = {.leaf_type = LEAF_EXPR,
+const abstractSyntaxTree UnitAst = {.leaf_type = LEAF_EXPR | LeafScalar,
                                     .expr_class = &UnitType};
+
 
 typedef struct Symbol {
   str sym_name;

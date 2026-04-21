@@ -324,24 +324,29 @@ size_t Parser(const token_t *ts, size_t ts_length, struct parserEnv *env,
     if (ts_length < 2) {
       UNMATCHEDPAREN_EXIT(env->srcmap, ts->character_offset);
     }
-    if (ts[1].token_type == TokenParenClose) {
-      switch (pctx.pctt) {
-      contextType:
-        *ast = UnitTypeDef;
-        return 2;
-        break;
-      contextExpr:
-        *ast = UnitAst;
-        return 2;
-        break;
-      }
-      size_t d = 1;
+    break;
+  case TokenUnit:
+    switch (pctx.pctt) {
+    case contextType:
+      *ast = UnitTypeDef;
+      return 2;
+      break;
+    case contextExpr:
+      *ast = UnitAst;
+      return 2;
+      break;
     }
-
+    size_t d = 1;
     break;
   }
+  exit(1);
 }
-typedef struct parserEnv parserEnv;
+
+void print_ast(abstractSyntaxTree *a) {
+  if (a->leaf_type & LEAF_EXPR) {
+    printf("expr!\n");
+  }
+}
 
 void hashmap_test() {
   hashMap m = {.ks = calloc(2, sizeof(hashMapKeyEntry)),
@@ -392,6 +397,10 @@ int main(int argc, char **argv) {
     printf("map failed\n");
     return 1;
   }
+  if (!fst.st_size) {
+    printf("empty file\n");
+    return 1;
+  }
   size_t tokens_vector_size = (fst.st_size << 2) * sizeof(token_t);
   arena a = {.head = makeRegion(ARENA_REGION_DEFAULT_CAPACITY << 3),
              .tail = a.head};
@@ -406,6 +415,18 @@ int main(int argc, char **argv) {
   for (size_t i = 0; i < tv.len / sizeof(token_t); i++) {
     printf("%s\n", TokenTypeString[((token_t *)tv.v)[i].token_type]);
   }
+  struct parserEnv env = {
+      .arena = &a,
+      .srcmap = map,
+      .symbols = &(hashMap){
+          .ks = calloc(HASHMAP_DEFAULT_CAPACITY, sizeof(hashMapKeyEntry)),
+          .v = calloc(HASHMAP_DEFAULT_CAPACITY, sizeof(void *)),
+          .cap = HASHMAP_DEFAULT_CAPACITY}};
+  abstractSyntaxTree *ast = arenaAlloc(&a, sizeof(abstractSyntaxTree));
+  Parser(tv.v, tv.len / sizeof(token_t), &env,
+         (struct parseContext){.pctt = contextExpr}, 0, 0, ast);
+  print_ast(ast);
+  arenaFree(&a);
   hashmap_test();
   return 0;
 }
