@@ -348,11 +348,11 @@ void print_ast(abstractSyntaxTree *a) {
   }
 }
 
-void hashmap_test() {
-  hashMap m = {.ks = calloc(2, sizeof(hashMapKeyEntry)),
-               .v = calloc(2, sizeof(void *)),
-               .cap = 2};
+void hashmap_test(allocator_t * al) {
 
+  hashMap m = {.ks = al->alloc(al->allocator, sizeof(hashMapKeyEntry)),
+               .v = al->alloc(al->allocator, sizeof(void*)),
+               .cap = 1, .allocator = al};
   uint8_t k0[] = "dsgssdf";
   uint8_t v0[] = "hello!";
   uint8_t k1[] = {'x'};
@@ -375,8 +375,6 @@ void hashmap_test() {
   assert(!hashMapContains(&m, k0, sizeof(k0)));
   assert(!hashMapContains(&m, k1, sizeof(k1)));
   assert(!hashMapContains(&m, k2, sizeof(k2)));
-  free(m.ks);
-  free(m.v);
 }
 
 int main(int argc, char **argv) {
@@ -427,7 +425,7 @@ int main(int argc, char **argv) {
   Parser(tv.v, tv.len / sizeof(token_t), &env,
          (struct parseContext){.pctt = contextExpr}, 0, 0, ast);
   print_ast(ast);
+  hashmap_test(&allocator_interface);
   arenaFree(&a);
-  hashmap_test();
   return 0;
 }

@@ -23,9 +23,9 @@ typedef struct str {
 
 // allocator interface
 typedef struct allocator_t {
-  void *(*alloc)(void *allocator, size_t);
-  void *(*realloc)(void *allocator, void *, size_t);
-  void (*free)(void *allocator, void *);
+  void *(*alloc)(void *allocator, size_t size_nbytes);
+  void *(*realloc)(void *allocator, void *ptr, size_t new_size_nbytes);
+  void (*free)(void *allocator, void *ptr);
   void *allocator;
 } allocator_t;
 
@@ -116,9 +116,9 @@ typedef struct vector {
 void *vectorAlloc(vector *v, size_t size) {
   if (v->len + size > v->cap) {
     v->v = v->allocator->realloc(v->allocator->allocator, v->v,
-                                (v->cap << 2) + size);
+                                 (v->cap << 2) + size);
   }
-  uint8_t* va = (uint8_t *)v->v + v->len;
+  uint8_t *va = (uint8_t *)v->v + v->len;
   v->len += size;
   return va;
 }
@@ -149,6 +149,7 @@ struct hashMap {
   void **v;
   size_t len;
   size_t cap;
+  allocator_t *allocator;
 };
 
 typedef struct hashMap hashMap;
@@ -183,8 +184,8 @@ void hashMapCopyInternal(hashMapKeyEntry *sks, void **sv, size_t scap,
 
 void hashMapResizeRelocate(hashMap *s, size_t newcap) {
   void **nv = (void **)calloc(newcap, sizeof(void *));
-  hashMapKeyEntry *nks =
-      (hashMapKeyEntry *)calloc(newcap, sizeof(hashMapKeyEntry));
+  hashMapKeyEntry *nks = (hashMapKeyEntry *)s->allocator->alloc(
+      s->allocator->allocator, newcap * sizeof(hashMapKeyEntry));
   hashMapCopyInternal(s->ks, s->v, s->cap, nks, nv, newcap);
   s->v = nv;
   s->ks = nks;
@@ -196,8 +197,6 @@ void hashMapInsert(hashMap *m, const uint8_t *k, size_t k_length, void *v) {
     void *oks = m->ks;
     void *ov = m->v;
     hashMapResizeRelocate(m, m->cap << 1);
-    free(oks);
-    free(ov);
   }
   uint64_t i = fnv_1a(k, k_length) & (m->cap - 1);
   while ((m->ks + i)->k != 0) {
@@ -363,7 +362,6 @@ const abstractSyntaxTree UnitTypeDef = {.leaf_type = LeafType,
 
 const abstractSyntaxTree UnitAst = {.leaf_type = LEAF_EXPR | LeafScalar,
                                     .expr_class = &UnitType};
-
 
 typedef struct Symbol {
   str sym_name;
