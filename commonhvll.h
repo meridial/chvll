@@ -11,7 +11,7 @@
 
 // non-null terminated string
 typedef struct str {
-  uint8_t *s;
+  const uint8_t *s;
   size_t l;
 } str;
 
@@ -29,7 +29,7 @@ typedef struct allocator_t {
   void *allocator;
 } allocator_t;
 
-#define ARENA_REGION_DEFAULT_CAPACITY 1 << 13
+#define ARENA_REGION_DEFAULT_CAPACITY ((size_t)0x1000)
 
 typedef struct arenaRegion {
   size_t inuse;
@@ -58,18 +58,21 @@ int freeRegion(arenaRegion *r) {
   return munmap(r, r->cap + sizeof(arenaRegion));
 }
 
-void arenaMarkNotInUse(void *v) { ((arenaRegion *)v - 1)->inuse = 0; }
+void arenaMarkNotInUse(void *v) { (((arenaRegion *)v) - 1)->inuse = 0; }
 
 arenaRegion *_arenaAlloc(arena *a, size_t nbytes) {
   arenaRegion *r = a->head;
-  while (r->inuse && r->cap >= nbytes + sizeof(arenaRegion)) {
+  while (r->inuse || r->cap <= nbytes) {
     if (!r->next) {
       r->next = makeRegion(nbytes < ARENA_REGION_DEFAULT_CAPACITY
                                ? ARENA_REGION_DEFAULT_CAPACITY
                                : nbytes);
+      r = r->next;
+      goto ret;
     }
     r = r->next;
   }
+ret:
   r->inuse = 1;
   r->len = nbytes;
   return r;
@@ -90,11 +93,12 @@ void *arenaReAlloc(arena *a, void *v, size_t newsize) {
   arenaRegion *r = (arenaRegion *)v - 1;
   if (r->cap >= newsize) {
     r->len = newsize;
-    return r + 1;
+    return v;
   }
-  arenaRegion *nr = _arenaAlloc(a, newsize);
-  memcpy(nr + 1, r + 1, r->len);
-  return nr + 1;
+  r->inuse = 0;
+  arenaRegion *nr = _arenaAlloc(a, newsize) + 1;
+  memcpy(nr, r + 1, r->len);
+  return nr;
 }
 
 void *arenaAlloc_AllocatorInterface(void *a, size_t size) {
@@ -118,7 +122,14 @@ void *vectorAlloc(vector *v, size_t size) {
                                  (v->cap << 2) + size);
   }
   uint8_t *va = (uint8_t *)v->v + v->len;
+  memset(va, 0, size);
   v->len += size;
+  return va;
+}
+
+void *vectorPop(vector *v, size_t size) {
+  v->len -= size;
+  uint8_t *va = (uint8_t *)v->v + (v->len);
   return va;
 }
 
@@ -134,17 +145,11 @@ uint64_t fnv_1a(const uint8_t *v, size_t len) {
   return h;
 }
 
-#define HASHMAP_DEFAULT_CAPACITY (size_t)2048 // must be multiple of 2
-
-struct hashMapKeyEntry {
-  const uint8_t *k;
-  size_t k_length;
-};
-
-typedef struct hashMapKeyEntry hashMapKeyEntry;
+#define HASHMAP_DEFAULT_CAPACITY                                               \
+  ARENA_REGION_DEFAULT_CAPACITY // must be multiple of 2
 
 struct hashMap {
-  hashMapKeyEntry *ks;
+  str *ks;
   void **v;
   size_t len;
   size_t cap;
@@ -155,9 +160,8 @@ typedef struct hashMap hashMap;
 
 void *hashMapRetr(const hashMap *m, const uint8_t *k, size_t k_length) {
   uint64_t i = fnv_1a(k, k_length) & (m->cap - 1);
-  while ((m->ks + i)->k) {
-    if ((m->ks + i)->k_length == k_length &&
-        !memcmp(k, (m->ks + i)->k, k_length)) {
+  while ((m->ks + i)->s) {
+    if ((m->ks + i)->l == k_length && !memcmp(k, (m->ks + i)->s, k_length)) {
       return *(m->v + i);
     }
     i = (i + 1) & (m->cap - 1);
@@ -165,13 +169,13 @@ void *hashMapRetr(const hashMap *m, const uint8_t *k, size_t k_length) {
   return 0;
 }
 
-void hashMapCopyInternal(hashMapKeyEntry *sks, void **sv, size_t scap,
-                         hashMapKeyEntry *dks, void **dv, size_t dcap) {
+void hashMapCopyInternal(str *sks, void **sv, size_t scap, str *dks, void **dv,
+                         size_t dcap) {
   size_t i = 0;
   while (i < scap) {
-    if ((sks + i)->k) {
-      uint64_t di = fnv_1a((sks + i)->k, (sks + i)->k_length) & (dcap - 1);
-      while ((dks + di)->k != 0) {
+    if ((sks + i)->s) {
+      uint64_t di = fnv_1a((sks + i)->s, (sks + i)->l) & (dcap - 1);
+      while ((dks + di)->s != 0) {
         di = (di + 1) & (dcap - 1);
       };
       *(dks + di) = *(sks + i);
@@ -181,10 +185,11 @@ void hashMapCopyInternal(hashMapKeyEntry *sks, void **sv, size_t scap,
   }
 }
 
-void hashMapResizeRelocate(hashMap *s, size_t newcap) {
-  void **nv = (void **)calloc(newcap, sizeof(void *));
-  hashMapKeyEntry *nks = (hashMapKeyEntry *)s->allocator->alloc(
-      s->allocator->allocator, newcap * sizeof(hashMapKeyEntry));
+void hashMapResize(hashMap *s, size_t newcap) {
+  void **nv = (void **)s->allocator->alloc(s->allocator->allocator,
+                                           newcap * sizeof(void *));
+  str *nks =
+      (str *)s->allocator->alloc(s->allocator->allocator, newcap * sizeof(str));
   hashMapCopyInternal(s->ks, s->v, s->cap, nks, nv, newcap);
   s->v = nv;
   s->ks = nks;
@@ -195,14 +200,16 @@ void hashMapInsert(hashMap *m, const uint8_t *k, size_t k_length, void *v) {
   if (m->len == m->cap) {
     void *oks = m->ks;
     void *ov = m->v;
-    hashMapResizeRelocate(m, m->cap << 1);
+    hashMapResize(m, m->cap << 1);
+    m->allocator->free(m->allocator->allocator, oks);
+    m->allocator->free(m->allocator->allocator, ov);
   }
   uint64_t i = fnv_1a(k, k_length) & (m->cap - 1);
-  while ((m->ks + i)->k != 0) {
+  while ((m->ks + i)->s != 0) {
     i = (i + 1) & (m->cap - 1);
   };
-  (m->ks + i)->k = k;
-  (m->ks + i)->k_length = k_length;
+  (m->ks + i)->s = k;
+  (m->ks + i)->l = k_length;
   *(m->v + i) = v;
   m->len = m->len + 1;
   return;
@@ -210,10 +217,9 @@ void hashMapInsert(hashMap *m, const uint8_t *k, size_t k_length, void *v) {
 
 void hashMapPullOut(hashMap *m, const uint8_t *k, size_t k_length) {
   uint64_t i = fnv_1a(k, k_length) & (m->cap - 1);
-  while ((m->ks + i)->k) {
-    if ((m->ks + i)->k_length == k_length &&
-        !memcmp(k, (m->ks + i)->k, k_length)) {
-      (m->ks + i)->k = 0;
+  while ((m->ks + i)->s) {
+    if ((m->ks + i)->l == k_length && !memcmp(k, (m->ks + i)->s, k_length)) {
+      (m->ks + i)->s = 0;
     }
     i = (i + 1) & (m->cap - 1);
     m->len = m->len - 1;
@@ -223,9 +229,8 @@ void hashMapPullOut(hashMap *m, const uint8_t *k, size_t k_length) {
 
 int hashMapContains(hashMap *m, const uint8_t *k, size_t k_length) {
   uint64_t i = fnv_1a(k, k_length) & (m->cap - 1);
-  while ((m->ks + i)->k) {
-    if ((m->ks + i)->k_length == k_length &&
-        !memcmp(k, (m->ks + i)->k, k_length)) {
+  while ((m->ks + i)->s) {
+    if ((m->ks + i)->l == k_length && !memcmp(k, (m->ks + i)->s, k_length)) {
       return 1;
     }
     i = (i + 1) & (m->cap - 1);
@@ -237,6 +242,7 @@ int hashMapContains(hashMap *m, const uint8_t *k, size_t k_length) {
 #define DEFTOKENS                                                              \
   X(TokenAiden, "")                                                            \
   X(TokenString, "")                                                           \
+  X(TokenNegativeInteger, "")                                                  \
   X(TokenInteger, "")                                                          \
   X(Token2Colon, "::")                                                         \
   X(TokenL2RArrow, "->")                                                       \
@@ -261,7 +267,11 @@ int hashMapContains(hashMap *m, const uint8_t *k, size_t k_length) {
   X(TokenUnit, "()")                                                           \
   X(TokenSentinel, "sentinel")                                                 \
   X(TokenMatch, "match")                                                       \
-  X(TokenFatL2RArrow, "=>")
+  X(TokenFatL2RArrow, "=>")                                                    \
+  X(TokenAdd, "+")                                                             \
+  X(TokenSub, "-")                                                             \
+  X(TokenAsterisk, "*")                                                        \
+  X(TokenForwardSlash, "/")
 
 #define X(a, b) a,
 enum TokenType { DEFTOKENS };
@@ -304,7 +314,10 @@ typedef struct hvllClass {
     } fn;
     const hvllClass *pointee;
   };
-  const hvllClass *fields[];
+  struct Field {
+    hvllClass *t;
+    str name;
+  } fields[];
 } hvllClass;
 
 const hvllClass usize = {.type_mod = 0,
@@ -322,14 +335,13 @@ const hvllClass UnitType = {.type_mod = 0,
                             .size = 0,
                             .name = LSTR("UNIT")};
 
-#define LEAF_EXPR (size_t)1 << ((sizeof(size_t) * 8) - 1)
-
 enum LeafType {
-  LeafNull,
+  LeafRuntimeReserve,
   LeafDecl,
   LeafAssign,
   LeafFnCall,
   LeafType,
+  LeafUnit,
   LeafScalar,
 };
 
@@ -346,7 +358,7 @@ struct abstractSyntaxTree {
         struct {
           const abstractSyntaxTree **v;
           size_t field_count;
-        } table;
+        } table_array_syle_inst;
         struct {
           const void *v;
           size_t len;
@@ -356,11 +368,7 @@ struct abstractSyntaxTree {
   };
 };
 
-const abstractSyntaxTree UnitTypeDef = {.leaf_type = LeafType,
-                                        .type_class = &UnitType};
-
-const abstractSyntaxTree UnitAst = {.leaf_type = LEAF_EXPR | LeafScalar,
-                                    .expr_class = &UnitType};
+const abstractSyntaxTree UnitAst = {.leaf_type = LeafUnit};
 
 typedef struct Symbol {
   str sym_name;

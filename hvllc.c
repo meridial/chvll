@@ -274,7 +274,7 @@ void tokenize_normal(const uint8_t *srcmap, size_t len, arena *a, vector *tv) {
       t->s = is_negative ? -IntegerParse(srcmap + ci + 1, cci - ci - 1)
                          : IntegerParse(srcmap + ci, cci - ci);
       t->character_offset = ci;
-      t->token_type = TokenInteger;
+      t->token_type = is_negative ? TokenNegativeInteger : TokenInteger;
       ci = cci;
       current_token_start = cci;
       continue;
@@ -285,10 +285,14 @@ void tokenize_normal(const uint8_t *srcmap, size_t len, arena *a, vector *tv) {
   return;
 }
 
+// global context
 struct parserEnv {
   const uint8_t *srcmap;
   arena *arena;     //  general purpose
   hashMap *symbols; // K = str (*envSymbol), envSymbol
+  vector *argstack;
+  vector *verbstack;
+  size_t asti;
 };
 
 #define SYMBOLREDECLARATION_EXIT(srcmap, ci, len)                              \
@@ -306,53 +310,101 @@ struct parserEnv {
          "paren\x1b[m\n",                                                      \
          lo.line, lo.offset_from_line);                                        \
   exit(1);
+#define NOTENOUGHARGS_EXIT(srcmap, ci)                                         \
+  struct lineAndOffset lo = find_char_line(srcmap, ci);                        \
+  printf("\x1b[1;31mParser()\x1b[m: %lu:%lu => "                               \
+         "\x1b[1;31mnot enough arguments for an inline operation\x1b[m\n",     \
+         lo.line, lo.offset_from_line);                                        \
+  exit(1);
+#define INVALIDINLINEARGS_EXIT(srcmap, ci)                                     \
+  struct lineAndOffset lo = find_char_line(srcmap, ci);                        \
+  printf("\x1b[1;31mParser()\x1b[m: %lu:%lu => "                               \
+         "\x1b[1;31mnot invalid arguments for an inline operation\x1b[m\n",    \
+         lo.line, lo.offset_from_line);                                        \
+  exit(1);
 
+// immediate level context
 enum parseContextType { contextExpr, contextType };
+
+#define PCTT_NEGATIVE_INT ((uint8_t)1 << 7)
 
 struct parseContext {
   uint8_t pctt;
+  uint8_t depth;
+  uint32_t env_idx;
 };
 
-// single expr step parser
 size_t Parser(const token_t *ts, size_t ts_length, struct parserEnv *env,
-              struct parseContext pctx, size_t depth, size_t env_idx,
-              abstractSyntaxTree *ast) {
-  switch (ts->token_type) {
-  case TokenParenClose:
-    UNMATCHEDPAREN_EXIT(env->srcmap, ts->character_offset) break;
-  case TokenParenOpen:
-    if (ts_length < 2) {
-      UNMATCHEDPAREN_EXIT(env->srcmap, ts->character_offset);
-    }
-    break;
-  case TokenUnit:
-    switch (pctx.pctt) {
-    case contextType:
-      *ast = UnitTypeDef;
-      return 2;
+              struct parseContext pctx, abstractSyntaxTree *ast) {
+  size_t ti = 0;
+  while (ti < ts_length) {
+    token_t ct = ts[ti];
+    switch (ct.token_type) {
+    case TokenParenClose:
+      UNMATCHEDPAREN_EXIT(env->srcmap, ct.character_offset) break;
+    case TokenParenOpen:
+      if (ts_length < 2) {
+        UNMATCHEDPAREN_EXIT(env->srcmap, ct.character_offset);
+      }
       break;
-    case contextExpr:
+    case TokenUnit:
       *ast = UnitAst;
-      return 2;
+      break;
+    case TokenNegativeInteger:
+      pctx.pctt |= PCTT_NEGATIVE_INT;
+    case TokenInteger:
+      const hvllClass *et = pctx.pctt | PCTT_NEGATIVE_INT ? &isize : &usize;
+      if (ts_length - ti == 1) {
+        *ast = (abstractSyntaxTree){
+            .leaf_type = LeafScalar, .scalar_int = ct.s, .expr_class = et};
+        return ti + 1;
+      }
+      abstractSyntaxTree *ca =
+          vectorAlloc(env->argstack, sizeof(abstractSyntaxTree));
+      *ca = (abstractSyntaxTree){
+          .leaf_type = LeafScalar, .scalar_int = ct.s, .expr_class = et};
+      break;
+    case TokenAdd:
+    case TokenSub:
+    case TokenAsterisk:
+    case TokenForwardSlash:
+      if (env->argstack->len < 2) {
+        exit(12083); // implement clousures
+      }
+      abstractSyntaxTree a1 = *(abstractSyntaxTree *)vectorPop(
+          env->argstack, sizeof(abstractSyntaxTree));
+      abstractSyntaxTree a0 = *(abstractSyntaxTree *)vectorPop(
+          env->argstack, sizeof(abstractSyntaxTree));
+      abstractSyntaxTree *r0 =
+          vectorAlloc(env->argstack, sizeof(abstractSyntaxTree));
+      r0->leaf_type = LeafScalar;
+      r0->expr_class = a0.expr_class;
+      if (a1.leaf_type != LeafScalar || a0.leaf_type != LeafScalar) {
+        exit(3); // this will turn into function call
+      }
+      switch (ct.token_type) {
+      case TokenAdd:
+        r0->scalar_int = a1.scalar_int + a0.scalar_int;
+        break;
+      }
+      if (ts_length - ti == 1) {
+        memcpy(ast, r0, sizeof(abstractSyntaxTree));
+        return ti;
+      }
       break;
     }
-    size_t d = 1;
-    break;
+    ti++;
   }
-  exit(1);
+  exit(2);
 }
 
-void print_ast(abstractSyntaxTree *a) {
-  if (a->leaf_type & LEAF_EXPR) {
-    printf("expr!\n");
-  }
-}
+void print_ast(abstractSyntaxTree *a) { printf("evaluated to %ld\n", a->scalar_int); }
 
 void hashmap_test(allocator_t *al) {
 
-  hashMap m = {.ks = al->alloc(al->allocator, sizeof(hashMapKeyEntry)),
-               .v = al->alloc(al->allocator, sizeof(void *)),
-               .cap = 1,
+  hashMap m = {.ks = al->alloc(al->allocator, 2 * sizeof(str)),
+               .v = al->alloc(al->allocator, 2 * sizeof(void *)),
+               .cap = 2,
                .allocator = al};
   uint8_t k0[] = "dsgssdf";
   uint8_t v0[] = "hello!";
@@ -400,16 +452,16 @@ int main(int argc, char **argv) {
     printf("empty file\n");
     return 1;
   }
-  size_t tokens_vector_size = (fst.st_size << 2) * sizeof(token_t);
   arena a = {.head = makeRegion(ARENA_REGION_DEFAULT_CAPACITY << 3)};
   allocator_t allocator_interface = {.alloc = arenaAlloc_AllocatorInterface,
                                      .realloc = arenaReAlloc_AllocatorInterface,
                                      .free = arenaFree_AllocatorInterface,
                                      .allocator = &a};
+  hashmap_test(&allocator_interface);
   vector tv = {.allocator = &allocator_interface,
-               .cap = tokens_vector_size,
+               .cap = ARENA_REGION_DEFAULT_CAPACITY,
                .len = 0,
-               .v = arenaAlloc(&a, tokens_vector_size)};
+               .v = arenaAlloc(&a, ARENA_REGION_DEFAULT_CAPACITY)};
   tokenize_normal(map, fst.st_size, &a, &tv);
   for (size_t i = 0; i < tv.len / sizeof(token_t); i++) {
     printf("%s\n", TokenTypeString[((token_t *)tv.v)[i].token_type]);
@@ -417,15 +469,29 @@ int main(int argc, char **argv) {
   struct parserEnv env = {
       .arena = &a,
       .srcmap = map,
-      .symbols = &(hashMap){
-          .ks = calloc(HASHMAP_DEFAULT_CAPACITY, sizeof(hashMapKeyEntry)),
-          .v = calloc(HASHMAP_DEFAULT_CAPACITY, sizeof(void *)),
-          .cap = HASHMAP_DEFAULT_CAPACITY}};
+      .symbols =
+          &(hashMap){
+              .ks = arenaAlloc(&a, HASHMAP_DEFAULT_CAPACITY * sizeof(str)),
+              .v = arenaAlloc(&a, HASHMAP_DEFAULT_CAPACITY * sizeof(void *)),
+              .cap = HASHMAP_DEFAULT_CAPACITY,
+              .allocator = &allocator_interface,
+          },
+      .argstack = &(vector){.allocator = &allocator_interface,
+                            .cap = ARENA_REGION_DEFAULT_CAPACITY,
+                            .len = 0,
+                            .v = arenaAlloc(&a, ARENA_REGION_DEFAULT_CAPACITY)},
+      .verbstack =
+          &(vector){.allocator = &allocator_interface,
+                    .cap = ARENA_REGION_DEFAULT_CAPACITY,
+                    .len = 0,
+                    .v = arenaAlloc(&a, ARENA_REGION_DEFAULT_CAPACITY)}};
+  hashMapCopyInternal(builtinsymhm.ks, builtinsymhm.v, builtinsymhm.cap,
+                      env.symbols->ks, env.symbols->v, env.symbols->cap);
   abstractSyntaxTree *ast = arenaAlloc(&a, sizeof(abstractSyntaxTree));
   Parser(tv.v, tv.len / sizeof(token_t), &env,
-         (struct parseContext){.pctt = contextExpr}, 0, 0, ast);
+         (struct parseContext){.pctt = contextExpr, .depth = 0, .env_idx = 0},
+         ast);
   print_ast(ast);
-  hashmap_test(&allocator_interface);
   arenaFree(&a);
   return 0;
 }
