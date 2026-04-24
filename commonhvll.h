@@ -29,7 +29,7 @@ typedef struct allocator_t {
   void *allocator;
 } allocator_t;
 
-#define ARENA_REGION_DEFAULT_CAPACITY ((size_t)0x1000)
+#define ARENA_REGION_DEFAULT_CAPACITY ((size_t)1<<11)
 
 typedef struct arenaRegion {
   size_t inuse;
@@ -62,7 +62,7 @@ void arenaMarkNotInUse(void *v) { (((arenaRegion *)v) - 1)->inuse = 0; }
 
 arenaRegion *_arenaAlloc(arena *a, size_t nbytes) {
   arenaRegion *r = a->head;
-  while (r->inuse || r->cap <= nbytes) {
+  while (r->inuse || r->cap < nbytes) {
     if (!r->next) {
       r->next = makeRegion(nbytes < ARENA_REGION_DEFAULT_CAPACITY
                                ? ARENA_REGION_DEFAULT_CAPACITY
@@ -109,6 +109,8 @@ void *arenaReAlloc_AllocatorInterface(void *a, void *v, size_t newsize) {
 }
 void arenaFree_AllocatorInterface(void *_, void *v) { arenaMarkNotInUse(v); }
 
+// byte vector
+// please calculate size yourself
 typedef struct vector {
   void *v;
   size_t len;
@@ -128,6 +130,9 @@ void *vectorAlloc(vector *v, size_t size) {
 }
 
 void *vectorPop(vector *v, size_t size) {
+  if(size > v->len){
+    abort();
+  }
   v->len -= size;
   uint8_t *va = (uint8_t *)v->v + (v->len);
   return va;
@@ -343,6 +348,10 @@ enum LeafType {
   LeafType,
   LeafUnit,
   LeafScalar,
+  LeafAdd,
+  LeafSub,
+  LeafMul,
+  LeafDiv,
 };
 
 typedef struct abstractSyntaxTree abstractSyntaxTree;
@@ -363,6 +372,10 @@ struct abstractSyntaxTree {
           const void *v;
           size_t len;
         } array;
+        struct {
+          abstractSyntaxTree *a0;
+          abstractSyntaxTree *a1;
+        } op;
       };
     };
   };

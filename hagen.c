@@ -1,5 +1,6 @@
 #include "commonhvll.h"
 #include "stdlib.h"
+#include <stdio.h>
 
 void print_bytes(const uint8_t *s, size_t l) {
   for (size_t i = 0; i < l; i++) {
@@ -54,13 +55,11 @@ void print_builtin_symbols_hashmap_with_sub_one(hashMap *h) {
 #define HMAPCAP 256
 
 int main() {
-  struct tkent *tk = malloc(sizeof(tkns));
-  memcpy(tk, &tkns, sizeof(tkns));
   size_t largest_token_name;
   hashMap th = {.ks = calloc(HMAPCAP, sizeof(str)),
                 .v = calloc(HMAPCAP, sizeof(void *)),
                 .cap = HMAPCAP};
-  for (size_t i = TKNFLOOR; i <= sizeof(tkns) / sizeof(struct tkent) - TKNFLOOR;
+  for (size_t i = TKNFLOOR; i < (sizeof(tkns) / sizeof(struct tkent));
        i++) {
     hashMapInsert(&th, tkns[i].s.s, tkns[i].s.l, (void *)i);
   }
