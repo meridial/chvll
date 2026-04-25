@@ -293,9 +293,10 @@ void tokenize_normal(const uint8_t *srcmap, size_t len, arena *a, vector *tv) {
 struct parserEnv {
   const uint8_t *srcmap;
   allocator_t *allocator;
-  hashMap *symbols; // K = str (*envSymbol), envSymbol
-  vector *haystack;
-  vector *astack; // abstractSyntaxTree** => haystack[i]
+  hashMap *symbols; // str ,symbol
+  vector *haystack; // packed alloc
+  vector
+      *astack; // abstractSyntaxTree*[] => haystack. this is actual parser stack
 };
 
 #define SYMBOLREDECLARATION_EXIT(srcmap, ci, len)                              \
@@ -319,6 +320,12 @@ struct parserEnv {
          "\x1b[1;31mstray argument\x1b[m\n",                                   \
          lo.line, lo.offset_from_line);                                        \
   exit(1);
+#define UNEXPECTEDEXPR_EXIT(srcmap, ci)                                        \
+  struct lineAndOffset lo = find_char_line(srcmap, ci);                        \
+  printf("\x1b[1;31mParser()\x1b[m: %lu:%lu => "                               \
+         "\x1b[1;31mdid not expect an expression\x1b[m\n",                     \
+         lo.line, lo.offset_from_line);                                        \
+  exit(1);
 #define EXPECTEDEXPR_EXIT(srcmap, ci)                                          \
   struct lineAndOffset lo = find_char_line(srcmap, ci);                        \
   printf("\x1b[1;31mParser()\x1b[m: %lu:%lu => "                               \
@@ -339,37 +346,68 @@ enum parseContextType { contextNormal, contextType };
 
 struct parseContext {
   uint16_t pctt;
-  uint16_t depth;
-  uint32_t env_idx;
+  uint16_t envdepth;
+  uint64_t env_idx;
+  size_t astack_base;
 };
 
-size_t Parser(const token_t *ts, size_t ts_length, struct parserEnv *env,
-              struct parseContext pctx, abstractSyntaxTree *ast) {
-  size_t ti = 0;
-  if (ts_length == 0) {
+void ParseTuple(const token_t *ts, size_t ts_length, struct parserEnv *env,
+                struct parseContext pctx) {}
+
+size_t Parser(size_t ti, const token_t *ts, size_t ts_length,
+              struct parserEnv *env, struct parseContext pctx) {
+  if (ts_length - ti == 0) {
     abort();
   }
   while (1) {
     token_t ct = ts[ti];
     switch (ct.token_type) {
     case TokenParenClose:
-      UNMATCHEDPAREN_EXIT(env->srcmap, ct.character_offset) break;
+      if (env->astack->len == pctx.astack_base) {
+        EXPECTEDEXPR_EXIT(env->srcmap, ts[ti].character_offset)
+      }
+      return ti;
     case TokenParenOpen:
       if (ts_length < 2) {
         UNMATCHEDPAREN_EXIT(env->srcmap, ct.character_offset);
       }
-      break;
+      // stop parsing before entering malformed expression
+      size_t d = 1;
+      size_t i = ti + 1;
+      for (;; i++) {
+        if (i == ts_length) {
+          UNMATCHEDPAREN_EXIT(env->srcmap, ct.character_offset);
+        }
+        switch (ts[i].token_type) {
+        case TokenParenOpen:
+          d++;
+          break;
+        case TokenParenClose:
+          d--;
+          if (d == 0) {
+            goto p_ok;
+          }
+          continue;
+        default:
+          continue;
+        }
+      }
+    p_ok:
+      ti = Parser(ti + 1, ts, i + 1, env,
+                  (struct parseContext){.pctt = pctx.pctt,
+                                        .envdepth = pctx.envdepth + 1,
+                                        .env_idx = pctx.env_idx + 1,
+                                        .astack_base = env->astack->len});
+      goto mcon;
     case TokenUnit:
-      abstractSyntaxTree *uast =
-          vectorAlloc(env->haystack, sizeof(abstractSyntaxTree *));
-      *uast = UnitAst;
-      return 1;
+      const abstractSyntaxTree **uasth =
+          vectorAlloc(env->astack, sizeof(abstractSyntaxTree *));
+      *uasth = &UnitAst;
+      goto mcon;
       break;
     case TokenNegativeInteger:
       pctx.pctt |= PCTT_NEGATIVE_INT;
     case TokenInteger:
-      if ((pctx.pctt & 0xf) == contextNormal) {
-      }
       abstractSyntaxTree *ca =
           vectorAlloc(env->haystack, sizeof(abstractSyntaxTree));
       *ca = (abstractSyntaxTree){
@@ -377,23 +415,23 @@ size_t Parser(const token_t *ts, size_t ts_length, struct parserEnv *env,
       abstractSyntaxTree **cah =
           vectorAlloc(env->astack, sizeof(abstractSyntaxTree *));
       *cah = ca;
+      goto mcon;
       break;
     case TokenAdd:
     case TokenSub:
     case TokenAsterisk:
     case TokenForwardSlash:
-      if (env->astack->len < 2 * sizeof(abstractSyntaxTree *)) {
+      if (env->astack->len - pctx.astack_base <
+          2 * sizeof(abstractSyntaxTree *)) {
         printf("closures not implemented yet so no currying. sorry\n");
         exit(4); // TODO: implement closures
       }
-      abstractSyntaxTree **a1 =
-          vectorPop(env->astack, sizeof(abstractSyntaxTree *));
-      abstractSyntaxTree **a0 =
-          vectorPop(env->astack, sizeof(abstractSyntaxTree *));
+      abstractSyntaxTree **a0 = (abstractSyntaxTree **)vectorPop(
+          env->astack, sizeof(abstractSyntaxTree *) * 2);
       abstractSyntaxTree *v =
           vectorAlloc(env->haystack, sizeof(abstractSyntaxTree));
-      v->op.a0 = *a0;
-      v->op.a1 = *a1;
+      v->op.a0 = a0[0];
+      v->op.a1 = a0[1];
       abstractSyntaxTree **vh =
           vectorAlloc(env->astack, sizeof(abstractSyntaxTree *));
       *vh = v;
@@ -411,47 +449,56 @@ size_t Parser(const token_t *ts, size_t ts_length, struct parserEnv *env,
         v->leaf_type = LeafDiv;
         break;
       }
+      goto mcon;
       break;
     }
-
+    goto con;
+  mcon:
+    abstractSyntaxTree *c = *(((abstractSyntaxTree **)env->astack->v) - 1);
+    c->ci = ts[ti].character_offset;
+  con:
     if (ts_length - ti == 1) {
       break;
     }
     ti++;
   }
-  if (env->astack->len != 1 * sizeof(abstractSyntaxTree *)) {
+  if (env->astack->len < pctx.astack_base) {
+    abort(); // ????
+  }
+  if (env->astack->len - pctx.astack_base != 1 * sizeof(abstractSyntaxTree *)) {
     STRAYARGS_EXIT(env->srcmap, ts[ti].character_offset)
   }
-  *ast = **(abstractSyntaxTree **)env->astack->v;
   return ti;
 }
 
 void print_ast(abstractSyntaxTree *a, size_t depth) {
   switch (a->leaf_type) {
+  case LeafUnit:
+    printf("%*sunit\n", depth);
+    return;
   case LeafScalar:
     printf("%*sscalar: %ld\n", depth, "", a->scalar_int);
-    break;
+    return;
   case LeafAdd:
     printf("%*s+\n", depth, "");
-    print_ast(a->op.a0, depth + 1);
-    print_ast(a->op.a1, depth + 1);
-    break;
+    goto print_op_args;
   case LeafSub:
     printf("%*s-\n", depth, "");
-    print_ast(a->op.a0, depth + 1);
-    print_ast(a->op.a1, depth + 1);
-    break;
+    goto print_op_args;
   case LeafMul:
     printf("%*s*\n", depth, "");
-    print_ast(a->op.a0, depth + 1);
-    print_ast(a->op.a1, depth + 1);
-    break;
+    goto print_op_args;
   case LeafDiv:
     printf("%*s/\n", depth, "");
-    print_ast(a->op.a0, depth + 1);
-    print_ast(a->op.a1, depth + 1);
+    goto print_op_args;
+  default:
+    exit(10);
     break;
   }
+print_op_args:
+  print_ast(a->op.a0, depth + 1);
+  print_ast(a->op.a1, depth + 1);
+  return;
 }
 
 void hashmap_test(allocator_t *al) {
@@ -542,10 +589,13 @@ int main(int argc, char **argv) {
   hashMapCopyInternal(builtinsymhm.ks, builtinsymhm.v, builtinsymhm.cap,
                       env.symbols->ks, env.symbols->v, env.symbols->cap);
   abstractSyntaxTree *ast = arenaAlloc(&a, sizeof(abstractSyntaxTree));
-  Parser(tv.v, tv.len / sizeof(token_t), &env,
-         (struct parseContext){.pctt = contextNormal, .depth = 0, .env_idx = 0},
-         ast);
-  print_ast(ast, 0);
+  Parser(0, tv.v, tv.len / sizeof(token_t), &env,
+         (struct parseContext){
+             .pctt = contextNormal,
+             .envdepth = 0,
+             .env_idx = 0,
+         });
+  print_ast(((abstractSyntaxTree **)env.astack->v)[0], 0);
   arenaFree(&a);
   return 0;
 }

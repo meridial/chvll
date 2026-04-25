@@ -29,7 +29,7 @@ typedef struct allocator_t {
   void *allocator;
 } allocator_t;
 
-#define ARENA_REGION_DEFAULT_CAPACITY ((size_t)1<<11)
+#define ARENA_REGION_DEFAULT_CAPACITY ((size_t)1 << 11)
 
 typedef struct arenaRegion {
   size_t inuse;
@@ -130,7 +130,7 @@ void *vectorAlloc(vector *v, size_t size) {
 }
 
 void *vectorPop(vector *v, size_t size) {
-  if(size > v->len){
+  if (size > v->len) {
     abort();
   }
   v->len -= size;
@@ -243,7 +243,7 @@ int hashMapContains(hashMap *m, const uint8_t *k, size_t k_length) {
   return 0;
 }
 // do linear search for now. too lazy to sort
-
+// actually we do baked hashmaps now
 #define DEFTOKENS                                                              \
   X(TokenAiden, "")                                                            \
   X(TokenString, "")                                                           \
@@ -276,7 +276,12 @@ int hashMapContains(hashMap *m, const uint8_t *k, size_t k_length) {
   X(TokenAdd, "+")                                                             \
   X(TokenSub, "-")                                                             \
   X(TokenAsterisk, "*")                                                        \
-  X(TokenForwardSlash, "/")
+  X(TokenForwardSlash, "/")                                                    \
+  X(TokenOtherwise, "otherwise")                                               \
+  X(TokenVertical, "|")                                                        \
+  X(TokenR2LArrow, "<-")                                                       \
+  X(TokenFatR2LArrow, "<=")                                                    \
+  X(TokenAmpersand, "&")
 
 #define X(a, b) a,
 enum TokenType { DEFTOKENS };
@@ -352,12 +357,14 @@ enum LeafType {
   LeafSub,
   LeafMul,
   LeafDiv,
+  LeafTuple,
 };
 
 typedef struct abstractSyntaxTree abstractSyntaxTree;
 
 struct abstractSyntaxTree {
   size_t leaf_type;
+  size_t ci;
   union {
     const hvllClass *type_class;
     struct {
