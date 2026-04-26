@@ -33,7 +33,7 @@ void print_tokens_hashmap(hashMap *h) {
 void print_builtin_symbols_hashmap_with_sub_one(hashMap *h) {
   printf("{(str[]){");
   for (size_t i = 0; i < h->cap; i++) {
-    if (!h->ks[i].l) {
+    if (!h->ks[i].s) {
       printf("{0,0},");
       continue;
     }

@@ -242,6 +242,16 @@ int hashMapContains(hashMap *m, const uint8_t *k, size_t k_length) {
   }
   return 0;
 }
+
+struct token_t {
+  size_t s;
+  size_t len;
+  size_t character_offset;
+  size_t token_type;
+};
+
+typedef struct token_t token_t;
+
 // do linear search for now. too lazy to sort
 // actually we do baked hashmaps now
 #define DEFTOKENS                                                              \
@@ -281,7 +291,9 @@ int hashMapContains(hashMap *m, const uint8_t *k, size_t k_length) {
   X(TokenVertical, "|")                                                        \
   X(TokenR2LArrow, "<-")                                                       \
   X(TokenFatR2LArrow, "<=")                                                    \
-  X(TokenAmpersand, "&")
+  X(TokenAmpersand, "&")                                                       \
+  X(TokenMul, "mul")                                                           \
+  X(TokenDiv, "div")
 
 #define X(a, b) a,
 enum TokenType { DEFTOKENS };
@@ -304,16 +316,16 @@ typedef struct hvllClass hvllClass;
 #define TYPEMODIFIER_BORROW 1 << 3
 
 #define TYPECLASS_UNIT 1
-#define TYPECLASS_INTEGER 2
-#define TYPECLASS_BOOLEAN 3
-#define TYPECLASS_FUNCTION 4
-#define TYPECLASS_FATPTR 5
-#define TYPECLASS_PTR 6
-#define TYPECLASS_TABLE 7
+#define TYPECLASS_INTEGER                                                      \
+  1 << 1 // same as pointer. except pointers have .pointee
+#define TYPECLASS_BOOLEAN 1 << 2
+#define TYPECLASS_FUNCTION 1 << 3
+#define TYPECLASS_FATPTR 1 << 4
+#define TYPECLASS_TABLE 1 << 5
 
 typedef struct hvllClass {
-  int type_mod;
-  int type_class;
+  uint32_t type_mod;
+  uint32_t type_class;
   size_t size;
   str name;
   union {
@@ -330,20 +342,16 @@ typedef struct hvllClass {
   } fields[];
 } hvllClass;
 
-const hvllClass usize = {.type_mod = 0,
-                         .type_class = TYPECLASS_INTEGER,
+const hvllClass usize = {.type_class = TYPECLASS_INTEGER,
                          .size = sizeof(size_t),
                          .name = LSTR("usize"),
                          .is_integer_signed = 0};
-const hvllClass isize = {.type_mod = 0,
-                         .type_class = TYPECLASS_INTEGER,
+const hvllClass isize = {.type_class = TYPECLASS_INTEGER,
                          .size = sizeof(size_t),
                          .name = LSTR("isize"),
                          .is_integer_signed = 1};
-const hvllClass UnitType = {.type_mod = 0,
-                            .type_class = TYPECLASS_UNIT,
-                            .size = 0,
-                            .name = LSTR("UNIT")};
+const hvllClass UnitType = {
+    .type_class = TYPECLASS_UNIT, .size = 0, .name = LSTR("UNIT")};
 
 enum LeafType {
   LeafRuntimeReserve,
@@ -358,17 +366,18 @@ enum LeafType {
   LeafMul,
   LeafDiv,
   LeafTuple,
+  LeafIdentifier
 };
 
 typedef struct abstractSyntaxTree abstractSyntaxTree;
 
 struct abstractSyntaxTree {
   size_t leaf_type;
-  size_t ci;
+  const token_t *stk;
   union {
-    const hvllClass *type_class;
+    const hvllClass *type_type;
     struct {
-      const hvllClass *expr_class;
+      const hvllClass *expr_type; // resulting type if evaluated
       union {
         size_t scalar_int;
         struct {
@@ -388,7 +397,6 @@ struct abstractSyntaxTree {
   };
 };
 
-const abstractSyntaxTree UnitAst = {.leaf_type = LeafUnit};
 
 typedef struct Symbol {
   str sym_name;
@@ -399,7 +407,7 @@ typedef struct Symbol {
 
 #define DEFTYPESYMBOL(nm, t)                                                   \
   {.sym_name = LSTR(nm),                                                       \
-   .ast = {.leaf_type = LeafType, .type_class = t},                            \
+   .ast = {.leaf_type = LeafType, .type_type = t},                             \
    .depth = 0,                                                                 \
    .env_id = 0}
 

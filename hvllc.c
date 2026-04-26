@@ -8,18 +8,12 @@
 #include "string.h"
 #include "sys/mman.h"
 #include "sys/stat.h"
-
-struct token_t {
-  size_t s;
-  size_t len;
-  size_t character_offset;
-  size_t token_type;
-};
-
-typedef struct token_t token_t;
+#include "signal.h"
+#include <signal.h>
 
 struct lineAndOffset {
   size_t line;
+  size_t line_start;
   size_t offset_from_line;
 } find_char_line(const uint8_t *s, size_t ci) {
   size_t n = 1;
@@ -27,11 +21,14 @@ struct lineAndOffset {
   size_t i = 0;
   for (; i < ci; i++) {
     if (*(s + i) == '\n') {
-      ln = i;
+      if (i + 1 != ci) {
+        ln = i + 1;
+      }
       n++;
     }
   }
-  struct lineAndOffset l = {.line = n, .offset_from_line = i - ln};
+  struct lineAndOffset l = {
+      .line = n, .line_start = ln, .offset_from_line = i - ln};
   return l;
 }
 
@@ -314,31 +311,32 @@ struct parserEnv {
          "paren\x1b[m\n",                                                      \
          lo.line, lo.offset_from_line);                                        \
   exit(1);
-#define STRAYARGS_EXIT(srcmap, ci)                                             \
+#define STRAYARGS_EXIT(srcmap, ci, len)                                        \
   struct lineAndOffset lo = find_char_line(srcmap, ci);                        \
   printf("\x1b[1;31mParser()\x1b[m: %lu:%lu => "                               \
-         "\x1b[1;31mstray argument\x1b[m\n",                                   \
-         lo.line, lo.offset_from_line);                                        \
+         "\x1b[1;31mstray argument\x1b[m (%.*s)\n",                            \
+         lo.line, lo.offset_from_line, len, srcmap + ci);                      \
   exit(1);
-#define UNEXPECTEDEXPR_EXIT(srcmap, ci)                                        \
+#define UNEXPECTEDEXPR_EXIT(srcmap, ci, len)                                   \
   struct lineAndOffset lo = find_char_line(srcmap, ci);                        \
   printf("\x1b[1;31mParser()\x1b[m: %lu:%lu => "                               \
-         "\x1b[1;31mdid not expect an expression\x1b[m\n",                     \
-         lo.line, lo.offset_from_line);                                        \
+         "\x1b[1;31mdid not expect an expression\x1b[m (%.*s)\n",              \
+         lo.line, lo.offset_from_line, len, srcmap + ci);                      \
   exit(1);
-#define EXPECTEDEXPR_EXIT(srcmap, ci)                                          \
+#define EXPECTEDEXPR_EXIT(srcmap, ci, len)                                     \
   struct lineAndOffset lo = find_char_line(srcmap, ci);                        \
   printf("\x1b[1;31mParser()\x1b[m: %lu:%lu => "                               \
-         "\x1b[1;31mexpected an expression\x1b[m\n",                           \
-         lo.line, lo.offset_from_line);                                        \
+         "\x1b[1;31mexpected an expression\x1b[m (%.*s)\n",                    \
+         lo.line, lo.offset_from_line, len, srcmap + ci);                      \
   exit(1);
-#define INVALIDINLINEARGS_EXIT(srcmap, ci)                                     \
+#define INVALIDARGTYPE_EXIT(srcmap, ci)          \
   struct lineAndOffset lo = find_char_line(srcmap, ci);                        \
   printf("\x1b[1;31mParser()\x1b[m: %lu:%lu => "                               \
-         "\x1b[1;31mnot invalid arguments for an inline operation\x1b[m\n",    \
-         lo.line, lo.offset_from_line);                                        \
+         "\x1b[1;31margument \x1b[1;31mdoes not have "            \
+         "expected type or typeclass\x1b[m \"(%.*s)\"\n",                          \
+         lo.line, lo.offset_from_line,                     \
+         lo.offset_from_line - lo.line_start, srcmap + lo.line_start);         \
   exit(1);
-
 // immediate level context
 enum parseContextType { contextNormal, contextType };
 
@@ -347,7 +345,8 @@ enum parseContextType { contextNormal, contextType };
 struct parseContext {
   uint16_t pctt;
   uint16_t envdepth;
-  uint64_t env_idx;
+  size_t leaf;
+  size_t env_idx;
   size_t astack_base;
 };
 
@@ -363,10 +362,7 @@ size_t Parser(size_t ti, const token_t *ts, size_t ts_length,
     token_t ct = ts[ti];
     switch (ct.token_type) {
     case TokenParenClose:
-      if (env->astack->len == pctx.astack_base) {
-        EXPECTEDEXPR_EXIT(env->srcmap, ts[ti].character_offset)
-      }
-      return ti;
+      abort();
     case TokenParenOpen:
       if (ts_length < 2) {
         UNMATCHEDPAREN_EXIT(env->srcmap, ct.character_offset);
@@ -393,71 +389,79 @@ size_t Parser(size_t ti, const token_t *ts, size_t ts_length,
         }
       }
     p_ok:
-      ti = Parser(ti + 1, ts, i + 1, env,
+      ti = Parser(ti + 1, ts, i, env,
                   (struct parseContext){.pctt = pctx.pctt,
                                         .envdepth = pctx.envdepth + 1,
                                         .env_idx = pctx.env_idx + 1,
-                                        .astack_base = env->astack->len});
+                                        .astack_base = env->astack->len}) +
+           1;
       goto mcon;
     case TokenUnit:
+      abstractSyntaxTree *uast =
+          vectorAlloc(env->haystack, sizeof(abstractSyntaxTree));
       const abstractSyntaxTree **uasth =
           vectorAlloc(env->astack, sizeof(abstractSyntaxTree *));
-      *uasth = &UnitAst;
+      *uast = (abstractSyntaxTree){
+          .leaf_type = LeafUnit, .scalar_int = ct.s, .expr_type = &UnitType};
+      *uasth = uast;
       goto mcon;
-      break;
     case TokenNegativeInteger:
       pctx.pctt |= PCTT_NEGATIVE_INT;
     case TokenInteger:
+      hvllClass *iet = vectorAlloc(env->haystack, sizeof(hvllClass));
+      *iet = isize;
       abstractSyntaxTree *ca =
           vectorAlloc(env->haystack, sizeof(abstractSyntaxTree));
       *ca = (abstractSyntaxTree){
-          .leaf_type = LeafScalar, .scalar_int = ct.s, .expr_class = &isize};
+          .leaf_type = LeafScalar, .scalar_int = ct.s, .expr_type = iet};
       abstractSyntaxTree **cah =
           vectorAlloc(env->astack, sizeof(abstractSyntaxTree *));
       *cah = ca;
       goto mcon;
       break;
     case TokenAdd:
+      pctx.leaf = LeafAdd;
+      goto fold_scalar_op;
     case TokenSub:
-    case TokenAsterisk:
-    case TokenForwardSlash:
-      if (env->astack->len - pctx.astack_base <
-          2 * sizeof(abstractSyntaxTree *)) {
-        printf("closures not implemented yet so no currying. sorry\n");
-        exit(4); // TODO: implement closures
-      }
-      abstractSyntaxTree **a0 = (abstractSyntaxTree **)vectorPop(
-          env->astack, sizeof(abstractSyntaxTree *) * 2);
-      abstractSyntaxTree *v =
-          vectorAlloc(env->haystack, sizeof(abstractSyntaxTree));
-      v->op.a0 = a0[0];
-      v->op.a1 = a0[1];
-      abstractSyntaxTree **vh =
-          vectorAlloc(env->astack, sizeof(abstractSyntaxTree *));
-      *vh = v;
-      switch (ct.token_type) {
-      case TokenAdd:
-        v->leaf_type = LeafAdd;
-        break;
-      case TokenSub:
-        v->leaf_type = LeafSub;
-        break;
-      case TokenAsterisk:
-        v->leaf_type = LeafMul;
-        break;
-      case TokenForwardSlash:
-        v->leaf_type = LeafDiv;
-        break;
-      }
-      goto mcon;
-      break;
+      pctx.leaf = LeafSub;
+      goto fold_scalar_op;
+    case TokenMul:
+      pctx.leaf = LeafMul;
+      goto fold_scalar_op;
+    case TokenDiv:
+      pctx.leaf = LeafDiv;
+      goto fold_scalar_op;
+    default:
+      abort();
     }
-    goto con;
+  fold_scalar_op:
+    if (env->astack->len - pctx.astack_base <
+        2 * sizeof(abstractSyntaxTree *)) {
+      printf("closures not implemented yet so no currying. sorry\n");
+      exit(4); // TODO: implement closures
+    }
+    abstractSyntaxTree **a = (abstractSyntaxTree **)vectorPop(
+        env->astack, sizeof(abstractSyntaxTree *) * 2);
+    if((a[0]->expr_type->type_class | a[1]->expr_type->type_class) ^ TYPECLASS_INTEGER){
+      INVALIDARGTYPE_EXIT(env->srcmap, ct.character_offset);
+    }
+    abstractSyntaxTree *v =
+        vectorAlloc(env->haystack, sizeof(abstractSyntaxTree));
+    v->op.a0 = a[0];
+    v->op.a1 = a[1];
+    abstractSyntaxTree **vh =
+        vectorAlloc(env->astack, sizeof(abstractSyntaxTree *));
+    *vh = v;
+    v->leaf_type = pctx.leaf;
+    v->expr_type = v->op.a1->expr_type;
+    goto mcon;
   mcon:
-    abstractSyntaxTree *c = *(((abstractSyntaxTree **)env->astack->v) - 1);
-    c->ci = ts[ti].character_offset;
+    abstractSyntaxTree *c =
+        *((abstractSyntaxTree **)(env->astack->v + env->astack->len -
+                                  sizeof(abstractSyntaxTree *)));
+    c->stk = (ts + ti);
   con:
-    if (ts_length - ti == 1) {
+    if (ts_length - 1 == ti) {
       break;
     }
     ti++;
@@ -466,7 +470,7 @@ size_t Parser(size_t ti, const token_t *ts, size_t ts_length,
     abort(); // ????
   }
   if (env->astack->len - pctx.astack_base != 1 * sizeof(abstractSyntaxTree *)) {
-    STRAYARGS_EXIT(env->srcmap, ts[ti].character_offset)
+    STRAYARGS_EXIT(env->srcmap, ts[ti].character_offset, ts[ti].len)
   }
   return ti;
 }
@@ -477,7 +481,8 @@ void print_ast(abstractSyntaxTree *a, size_t depth) {
     printf("%*sunit\n", depth);
     return;
   case LeafScalar:
-    printf("%*sscalar: %ld\n", depth, "", a->scalar_int);
+    printf("%*sscalar: %ld (%.*s)\n", depth, "", a->scalar_int,
+           a->expr_type->name.l, a->expr_type->name.s);
     return;
   case LeafAdd:
     printf("%*s+\n", depth, "");
@@ -486,10 +491,10 @@ void print_ast(abstractSyntaxTree *a, size_t depth) {
     printf("%*s-\n", depth, "");
     goto print_op_args;
   case LeafMul:
-    printf("%*s*\n", depth, "");
+    printf("%*smul\n", depth, "");
     goto print_op_args;
   case LeafDiv:
-    printf("%*s/\n", depth, "");
+    printf("%*sdiv\n", depth, "");
     goto print_op_args;
   default:
     exit(10);

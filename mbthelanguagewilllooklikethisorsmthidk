@@ -6,9 +6,10 @@ raylib include
 ("World.. Hello!" fd:stdout:io strwrite) print_hi =
 
 isize isize <-> fac ::
+
+    (n 0 <) 0 |
+    (n 1 - fac n +) otherwise 
 fac
-    0 (n 0 <) |
-    (n 1 - fac n +) otherwise
 
 1 1 fac =
 
