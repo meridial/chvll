@@ -8,8 +8,6 @@
 #include "string.h"
 #include "sys/mman.h"
 #include "sys/stat.h"
-#include "signal.h"
-#include <signal.h>
 
 struct lineAndOffset {
   size_t line;
@@ -294,6 +292,7 @@ struct parserEnv {
   vector *haystack; // packed alloc
   vector
       *astack; // abstractSyntaxTree*[] => haystack. this is actual parser stack
+  size_t env_id_counter;
 };
 
 #define SYMBOLREDECLARATION_EXIT(srcmap, ci, len)                              \
@@ -323,30 +322,47 @@ struct parserEnv {
          "\x1b[1;31mdid not expect an expression\x1b[m (%.*s)\n",              \
          lo.line, lo.offset_from_line, len, srcmap + ci);                      \
   exit(1);
-#define EXPECTEDEXPR_EXIT(srcmap, ci, len)                                     \
+#define EXPECTED_EXIT(exstr, srcmap, ci, len)                                  \
   struct lineAndOffset lo = find_char_line(srcmap, ci);                        \
   printf("\x1b[1;31mParser()\x1b[m: %lu:%lu => "                               \
-         "\x1b[1;31mexpected an expression\x1b[m (%.*s)\n",                    \
+         "\x1b[1;31mexpected %s\x1b[m (%.*s)\n",                               \
+         lo.line, lo.offset_from_line, exstr, len, srcmap + ci);               \
+  exit(1);
+#define NOTENOUGHARGSASSIGN_EXIT(srcmap, ci, len)                              \
+  struct lineAndOffset lo = find_char_line(srcmap, ci);                        \
+  printf("\x1b[1;31mParser()\x1b[m: %lu:%lu => "                               \
+         "\x1b[1;31mnot enough arguments for assignment\x1b[m (%.*s)\n",       \
+         lo.line, lo.offset_from_line, lo.offset_from_line - lo.line_start,    \
+         srcmap + lo.line_start);                                              \
+  exit(1);
+#define NOTENOUGHARGSDECL_EXIT(srcmap, ci, len)                                \
+  struct lineAndOffset lo = find_char_line(srcmap, ci);                        \
+  printf("\x1b[1;31mParser()\x1b[m: %lu:%lu => "                               \
+         "\x1b[1;31mnot enough arguments for declaration\x1b[m (%.*s)\n",      \
+         lo.line, lo.offset_from_line, lo.offset_from_line - lo.line_start,    \
+         srcmap + lo.line_start);                                              \
+  exit(1);
+#define INVALIDARGTYPE_EXIT(srcmap, ci)                                        \
+  struct lineAndOffset lo = find_char_line(srcmap, ci);                        \
+  printf("\x1b[1;31mParser()\x1b[m: %lu:%lu => "                               \
+         "\x1b[1;31margument \x1b[1;31mdoes not have "                         \
+         "expected type or typeclass of\x1b[m \"(%.*s)\"\n",                   \
+         lo.line, lo.offset_from_line, lo.offset_from_line - lo.line_start,    \
+         srcmap + lo.line_start);                                              \
+  exit(1);
+#define UNREGISTEREDTYPE_EXIT(srcmap, ci, len)                                 \
+  struct lineAndOffset lo = find_char_line(srcmap, ci);                        \
+  printf("\x1b[1;31mParser()\x1b[m: %lu:%lu => "                               \
+         "\x1b[1;31munregistered type\x1b[m \"(%.*s)\"\n",                     \
          lo.line, lo.offset_from_line, len, srcmap + ci);                      \
   exit(1);
-#define INVALIDARGTYPE_EXIT(srcmap, ci)          \
-  struct lineAndOffset lo = find_char_line(srcmap, ci);                        \
-  printf("\x1b[1;31mParser()\x1b[m: %lu:%lu => "                               \
-         "\x1b[1;31margument \x1b[1;31mdoes not have "            \
-         "expected type or typeclass\x1b[m \"(%.*s)\"\n",                          \
-         lo.line, lo.offset_from_line,                     \
-         lo.offset_from_line - lo.line_start, srcmap + lo.line_start);         \
-  exit(1);
 // immediate level context
-enum parseContextType { contextNormal, contextType };
 
 #define PCTT_NEGATIVE_INT ((uint8_t)1 << 15)
 
 struct parseContext {
-  uint16_t pctt;
-  uint16_t envdepth;
-  size_t leaf;
-  size_t env_idx;
+  uint16_t env_depth;
+  uint16_t c_env_id;
   size_t astack_base;
 };
 
@@ -358,11 +374,12 @@ size_t Parser(size_t ti, const token_t *ts, size_t ts_length,
   if (ts_length - ti == 0) {
     abort();
   }
+  size_t leaf;
   while (1) {
     token_t ct = ts[ti];
     switch (ct.token_type) {
     case TokenParenClose:
-      abort();
+      UNMATCHEDPAREN_EXIT(env->srcmap, ct.character_offset);
     case TokenParenOpen:
       if (ts_length < 2) {
         UNMATCHEDPAREN_EXIT(env->srcmap, ct.character_offset);
@@ -390,77 +407,135 @@ size_t Parser(size_t ti, const token_t *ts, size_t ts_length,
       }
     p_ok:
       ti = Parser(ti + 1, ts, i, env,
-                  (struct parseContext){.pctt = pctx.pctt,
-                                        .envdepth = pctx.envdepth + 1,
-                                        .env_idx = pctx.env_idx + 1,
+                  (struct parseContext){.env_depth = pctx.env_depth + 1,
+
                                         .astack_base = env->astack->len}) +
            1;
       goto mcon;
     case TokenUnit:
       abstractSyntaxTree *uast =
           vectorAlloc(env->haystack, sizeof(abstractSyntaxTree));
-      const abstractSyntaxTree **uasth =
-          vectorAlloc(env->astack, sizeof(abstractSyntaxTree *));
-      *uast = (abstractSyntaxTree){
-          .leaf_type = LeafUnit, .scalar_int = ct.s, .expr_type = &UnitType};
-      *uasth = uast;
+      *uast = (abstractSyntaxTree){.leaf_type = LeafUnit | LEAFEXPR};
+      vectorPushVoidPtr(env->astack, uast);
       goto mcon;
     case TokenNegativeInteger:
-      pctx.pctt |= PCTT_NEGATIVE_INT;
     case TokenInteger:
       hvllClass *iet = vectorAlloc(env->haystack, sizeof(hvllClass));
       *iet = isize;
       abstractSyntaxTree *ca =
           vectorAlloc(env->haystack, sizeof(abstractSyntaxTree));
-      *ca = (abstractSyntaxTree){
-          .leaf_type = LeafScalar, .scalar_int = ct.s, .expr_type = iet};
-      abstractSyntaxTree **cah =
-          vectorAlloc(env->astack, sizeof(abstractSyntaxTree *));
-      *cah = ca;
+      *ca = (abstractSyntaxTree){.leaf_type = LeafScalar | LEAFEXPR,
+                                 .scalar_int = ct.s};
+      vectorPushVoidPtr(env->astack, ca);
       goto mcon;
       break;
     case TokenAdd:
-      pctx.leaf = LeafAdd;
-      goto fold_scalar_op;
+      leaf = LeafAdd | LEAFEXPR;
+      goto fold_2args_expr_verb;
     case TokenSub:
-      pctx.leaf = LeafSub;
-      goto fold_scalar_op;
+      leaf = LeafSub | LEAFEXPR;
+      goto fold_2args_expr_verb;
     case TokenMul:
-      pctx.leaf = LeafMul;
-      goto fold_scalar_op;
+      leaf = LeafMul | LEAFEXPR;
+      goto fold_2args_expr_verb;
     case TokenDiv:
-      pctx.leaf = LeafDiv;
-      goto fold_scalar_op;
+      leaf = LeafDiv | LEAFEXPR;
+      goto fold_2args_expr_verb;
+    case Token2Colon: // symbol lookup required for context: (=) operator reused
+                      // on normal assignments and function definition.
+      if (env->astack->len - pctx.astack_base <
+          2 * sizeof(abstractSyntaxTree *)) {
+        NOTENOUGHARGSDECL_EXIT(env->srcmap, ct.character_offset, ct.len)
+      }
+      abstractSyntaxTree **adecl =
+          vectorPop(env->astack, sizeof(abstractSyntaxTree *) * 2);
+      hvllClass *resolved_type;
+      if ((adecl[1]->leaf_type & LEAFEXPR)) { // casting type check to be
+                                              // proceeded in semantic typecheck
+        leaf = LeafCast | LEAFEXPR;
+        goto symdeclcast_push;
+      }
+      if (adecl[1]->leaf_type != LeafIdentifier) {
+        EXPECTED_EXIT("an identifier or an expression", env->srcmap,
+                      adecl[1]->stk->character_offset, adecl[1]->stk->len)
+      }
+      if (adecl[0]->leaf_type == LeafType) {
+      }
+      Symbol *sym = hashMapRetr(env->symbols, (uint8_t *)adecl[1]->stk->s,
+                                adecl[1]->stk->len);
+      if (!sym) {
+        Symbol *type_sym = hashMapRetr(
+            env->symbols, (uint8_t *)adecl[0]->stk->s, adecl[0]->stk->len);
+        if (!type_sym) {
+          UNREGISTEREDTYPE_EXIT(env->srcmap,
+                        adecl[0]->stk->character_offset, adecl[0]->stk->len)
+        }
+        Symbol *new_sym = vectorAlloc(env->haystack, sizeof(Symbol));
+        *new_sym = (Symbol){
+            .depth = pctx.env_depth,
+            .env_id = pctx.c_env_id,
+            .srcast = 0,
+            .sym_name = (str){(uint8_t *)adecl[1]->stk->s, adecl[1]->stk->len},
+            .type = type_sym->type};
+        hashMapInsert(env->symbols, (uint8_t *)adecl[1]->stk->s,
+                      adecl[1]->stk->len, new_sym);
+        leaf = LeafDecl;
+
+      } else {
+        leaf = LeafCast | LEAFEXPR;
+      }
+    symdeclcast_push:
+      abstractSyntaxTree *vdecl =
+          vectorAlloc(env->haystack, sizeof(abstractSyntaxTree));
+      vdecl->op.a1 = adecl[1];
+      vdecl->op.a0 = adecl[0];
+      vdecl->leaf_type = leaf;
+      vectorPushVoidPtr(env->astack, vdecl);
+      goto mcon;
+    case TokenAssign: // type propagation is very important
+      leaf = LeafAssign;
+      if (env->astack->len - pctx.astack_base <
+          2 * sizeof(abstractSyntaxTree *)) {
+        NOTENOUGHARGSASSIGN_EXIT(env->srcmap, ct.character_offset, ct.len)
+      }
+      abstractSyntaxTree **na = (abstractSyntaxTree **)vectorPop(
+          env->astack, sizeof(abstractSyntaxTree *) * 2);
+      abstractSyntaxTree *nv =
+          vectorAlloc(env->haystack, sizeof(abstractSyntaxTree));
+      goto mcon;
+    case TokenAiden:
+      // keys:
+      // orphan identifier/ global indentifer: hi
+      abstractSyntaxTree *aidenast =
+          vectorAlloc(env->haystack, sizeof(abstractSyntaxTree));
+      *aidenast = (abstractSyntaxTree){
+          .leaf_type = LeafIdentifier,
+          .identifier_name = (str){.l = ct.len, .s = (uint8_t *)ct.s}};
+      vectorPushVoidPtr(env->astack, aidenast);
+      goto mcon;
     default:
       abort();
     }
-  fold_scalar_op:
+    goto mcon;
+  fold_2args_expr_verb:
     if (env->astack->len - pctx.astack_base <
         2 * sizeof(abstractSyntaxTree *)) {
-      printf("closures not implemented yet so no currying. sorry\n");
       exit(4); // TODO: implement closures
     }
-    abstractSyntaxTree **a = (abstractSyntaxTree **)vectorPop(
-        env->astack, sizeof(abstractSyntaxTree *) * 2);
-    if((a[0]->expr_type->type_class | a[1]->expr_type->type_class) ^ TYPECLASS_INTEGER){
-      INVALIDARGTYPE_EXIT(env->srcmap, ct.character_offset);
-    }
-    abstractSyntaxTree *v =
+    abstractSyntaxTree **aexpr =
+        vectorPop(env->astack, sizeof(abstractSyntaxTree *) * 2);
+    abstractSyntaxTree *vexpr =
         vectorAlloc(env->haystack, sizeof(abstractSyntaxTree));
-    v->op.a0 = a[0];
-    v->op.a1 = a[1];
-    abstractSyntaxTree **vh =
-        vectorAlloc(env->astack, sizeof(abstractSyntaxTree *));
-    *vh = v;
-    v->leaf_type = pctx.leaf;
-    v->expr_type = v->op.a1->expr_type;
+    vexpr->op.a0 = aexpr[0];
+    vexpr->op.a1 = aexpr[1];
+    vectorPushVoidPtr(env->astack, vexpr);
+    vexpr->leaf_type = leaf;
     goto mcon;
   mcon:
     abstractSyntaxTree *c =
         *((abstractSyntaxTree **)(env->astack->v + env->astack->len -
                                   sizeof(abstractSyntaxTree *)));
     c->stk = (ts + ti);
-  con:
     if (ts_length - 1 == ti) {
       break;
     }
@@ -476,13 +551,12 @@ size_t Parser(size_t ti, const token_t *ts, size_t ts_length,
 }
 
 void print_ast(abstractSyntaxTree *a, size_t depth) {
-  switch (a->leaf_type) {
+  switch (a->leaf_type & 0xff) {
   case LeafUnit:
     printf("%*sunit\n", depth);
     return;
   case LeafScalar:
-    printf("%*sscalar: %ld (%.*s)\n", depth, "", a->scalar_int,
-           a->expr_type->name.l, a->expr_type->name.s);
+    printf("%*sscalar: %ld\n", depth, "", a->scalar_int);
     return;
   case LeafAdd:
     printf("%*s+\n", depth, "");
@@ -495,6 +569,19 @@ void print_ast(abstractSyntaxTree *a, size_t depth) {
     goto print_op_args;
   case LeafDiv:
     printf("%*sdiv\n", depth, "");
+    goto print_op_args;
+  case LeafIdentifier:
+    printf("%*sidentifier (%.*s)\n", depth, "", a->identifier_name.l,
+           a->identifier_name.s);
+    return;
+  case LeafAssign:
+    printf("%*s=\n", depth, "");
+    goto print_op_args;
+  case LeafDecl:
+    printf("%*s::(decl)\n", depth, "");
+    goto print_op_args;
+  case LeafCast:
+    printf("%*s::(cast)\n", depth, "");
     goto print_op_args;
   default:
     exit(10);
@@ -596,11 +683,10 @@ int main(int argc, char **argv) {
   abstractSyntaxTree *ast = arenaAlloc(&a, sizeof(abstractSyntaxTree));
   Parser(0, tv.v, tv.len / sizeof(token_t), &env,
          (struct parseContext){
-             .pctt = contextNormal,
-             .envdepth = 0,
-             .env_idx = 0,
+             .env_depth = 0,
          });
   print_ast(((abstractSyntaxTree **)env.astack->v)[0], 0);
   arenaFree(&a);
+  // to meself: if you are reading this at winter play easy delivery co
   return 0;
 }

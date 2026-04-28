@@ -5,7 +5,7 @@ raylib include
 () () <-> print_hi ::
 ("World.. Hello!" fd:stdout:io strwrite) print_hi =
 
-isize isize <-> fac ::
+isize isize <-> inline fac ::
 
     (n 0 <) 0 |
     (n 1 - fac n +) otherwise 
@@ -13,7 +13,7 @@ fac
 
 1 1 fac =
 
-((isize Add, isize Sub) leaf_type enum =) table AbstractSyntaxTree =
+((isize Add, isize Sub) enum leaf_type =) table AbstractSyntaxTree =
 
 (A Allocator) (u8 isize <-> A <-> [u8] <->) => repeat_char ::
 c n allocator ((((len 0 ==) (return) (char (array 0 []) <-; char (len 1 -) (array 1 []>) rset) <?> ) ; c (0 array ; ) <-) char len array\) rset = ; (n allocator:allocator alloc:allocator) a <- ; c n a rset
@@ -21,5 +21,5 @@ c n allocator ((((len 0 ==) (return) (char (array 0 []) <-; char (len 1 -) (arra
 void ptr vector mut ex::
 [u8] string::
 u8 array string:: // same thing
-string "henlo!!!" =
+string "henlo!!!" <-
 

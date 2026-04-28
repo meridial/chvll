@@ -138,6 +138,18 @@ void *vectorPop(vector *v, size_t size) {
   return va;
 }
 
+void vectorPushVoidPtr(vector *v, void *p) {
+  void **va = (void **)((uint8_t *)v->v + v->len);
+  *va = p;
+  v->len += sizeof(size_t);
+}
+
+void *vectorPopVoidPtr(vector *v, size_t s) {
+  void **va = (void **)((uint8_t *)v->v + v->len);
+  v->len -= sizeof(void *);
+  return *va;
+}
+
 #define FNV_OFFSET 0xcbf29ce484222325
 #define FNV_PRIME 0x100000001b3
 
@@ -293,7 +305,8 @@ typedef struct token_t token_t;
   X(TokenFatR2LArrow, "<=")                                                    \
   X(TokenAmpersand, "&")                                                       \
   X(TokenMul, "mul")                                                           \
-  X(TokenDiv, "div")
+  X(TokenDiv, "div")                                                           \
+  X(TokenThinSpacecraft, "<->")
 
 #define X(a, b) a,
 enum TokenType { DEFTOKENS };
@@ -353,10 +366,22 @@ const hvllClass isize = {.type_class = TYPECLASS_INTEGER,
 const hvllClass UnitType = {
     .type_class = TYPECLASS_UNIT, .size = 0, .name = LSTR("UNIT")};
 
+#define LEAFEXPR (size_t)1 << ((sizeof(size_t) * 8) - 1)
+// originally i planned to set expression type for every
+// expression while parsing but lookup in parser in
+// unnecessary and adds to complexity
+// unlike typeclasses where the type is needed for context. and there is only
+// one LeafType since i expect all type related stuff to be done in-compiler
+// currently. despite that i still need to know if something is an expression or
+// not for stuff like casts (::)
+// pretty sure there is a better way
+
 enum LeafType {
   LeafRuntimeReserve,
   LeafDecl,
+  LeafCast,
   LeafAssign,
+  LeafFnAssign,
   LeafFnCall,
   LeafType,
   LeafUnit,
@@ -365,8 +390,8 @@ enum LeafType {
   LeafSub,
   LeafMul,
   LeafDiv,
-  LeafTuple,
-  LeafIdentifier
+  LeafPoly,
+  LeafIdentifier,
 };
 
 typedef struct abstractSyntaxTree abstractSyntaxTree;
@@ -375,9 +400,9 @@ struct abstractSyntaxTree {
   size_t leaf_type;
   const token_t *stk;
   union {
+    str identifier_name;
     const hvllClass *type_type;
     struct {
-      const hvllClass *expr_type; // resulting type if evaluated
       union {
         size_t scalar_int;
         struct {
@@ -392,25 +417,27 @@ struct abstractSyntaxTree {
           abstractSyntaxTree *a0;
           abstractSyntaxTree *a1;
         } op;
+        struct {
+          abstractSyntaxTree **params;
+          size_t params_count;
+        };
       };
     };
   };
 };
 
-
 typedef struct Symbol {
   str sym_name;
-  const abstractSyntaxTree ast;
+  const hvllClass *type;
+  const abstractSyntaxTree *srcast;
   size_t depth;
   size_t env_id;
 } Symbol;
 
-#define DEFTYPESYMBOL(nm, t)                                                   \
-  {.sym_name = LSTR(nm),                                                       \
-   .ast = {.leaf_type = LeafType, .type_type = t},                             \
-   .depth = 0,                                                                 \
-   .env_id = 0}
+#define isize_sym                                                              \
+  (Symbol) { .sym_name = LSTR("isize"), .type = &isize, }
+#define usize_sym                                                              \
+  (Symbol) { .sym_name = LSTR("usize"), .type = &usize, }
 
 const Symbol builtin_symbols[] =
-    /* !!DO NOT CHANGE THIS COMMENT!! ~!*/ {DEFTYPESYMBOL("usize", &usize),
-                                            DEFTYPESYMBOL("isize", &isize)};
+    /* !!DO NOT CHANGE THIS COMMENT!! ~!*/ {isize_sym, usize_sym};
